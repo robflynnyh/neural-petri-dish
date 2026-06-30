@@ -1,22 +1,100 @@
 import numpy as np
-from numpy.lib.function_base import average, select
-from numpy.random import rand
 import torch
-from torch._C import Argument
 import torch.nn as nn
-import torch.nn.functional as F
-import os
-from sty import fg, bg, ef, rs
-import time
-import random
 import argparse
+import os
+from pathlib import Path
 import pickle
-
-import signal
+import random
+import shutil
 import sys
-# Weird errors where the cells can be in the same location and not die, and cells can move around in a weird way that constantly gives them health points
+import time
 
-cls = lambda: os.system('clear') or None
+try:
+    from sty import fg, bg
+except ModuleNotFoundError:
+    class _NoStyle:
+        rs = ''
+
+        def __call__(self, *_args, **_kwargs):
+            return ''
+
+        def __getattr__(self, _name):
+            return ''
+
+    fg = _NoStyle()
+    bg = _NoStyle()
+
+
+def cls():
+    if os.getenv('TERM'):
+        sys.stdout.write('\033[2J\033[H')
+        sys.stdout.flush()
+
+
+def hide_cursor():
+    if os.getenv('TERM'):
+        sys.stdout.write('\033[?25l')
+        sys.stdout.flush()
+
+
+def show_cursor():
+    if os.getenv('TERM'):
+        sys.stdout.write('\033[?25h')
+        sys.stdout.flush()
+
+
+def terminal_size(size=None):
+    if size is None:
+        try:
+            return os.get_terminal_size()
+        except OSError:
+            return shutil.get_terminal_size(fallback=(80, 24))
+    if hasattr(size, 'lines') and hasattr(size, 'columns'):
+        return size
+    lines, columns = size
+    return os.terminal_size((columns, lines))
+
+
+def parse_size(size):
+    if size is None:
+        return None
+    normalized = size.lower().replace(',', 'x')
+    try:
+        lines, columns = normalized.split('x', 1)
+        return int(lines), int(columns)
+    except ValueError as exc:
+        raise argparse.ArgumentTypeError('size must use LINESxCOLUMNS, for example 24x80') from exc
+
+
+def positive_int(value):
+    try:
+        parsed = int(value)
+    except ValueError as exc:
+        raise argparse.ArgumentTypeError('value must be an integer') from exc
+    if parsed <= 0:
+        raise argparse.ArgumentTypeError('value must be positive')
+    return parsed
+
+
+def seed_all(seed):
+    if seed is None:
+        return
+    random.seed(seed)
+    np.random.seed(seed)
+    torch.manual_seed(seed)
+
+
+def clone_parameter(tensor):
+    return nn.Parameter(tensor.detach().clone())
+
+
+def empty_positions(game):
+    play_area = game.grid[2:game.size.lines, 2:game.size.columns + 2]
+    positions = np.argwhere(play_area == 0)
+    return positions + np.array([2, 2])
+
+
 col = 16
 X = f'{bg(col)}❏{bg.rs}'# the icon for the cell *·◉ ○ ●○○✺✺
 BLANK = f'{bg(col)} {bg.rs}' # icon for empty cell °
@@ -43,7 +121,7 @@ class Cell(nn.Module):
         self.linear = nn.Linear(33, 9)
         self.relu = nn.ReLU()
         self.linear2 = nn.Linear(9, 9)
-        self.pos = pos
+        self.pos = list(pos)
         self.health = 2
         self.max_health = 15
         self.age = 0
@@ -52,20 +130,21 @@ class Cell(nn.Module):
 
         self.pos_list = []
 
-        if genes != None:
-            self.linear.weight = nn.Parameter(genes['weight_1'])
-            self.linear.bias = nn.Parameter(genes['bias_1'])
-            self.linear2.weight = nn.Parameter(genes['weight_2'])
-            self.linear2.bias = nn.Parameter(genes['bias_2'])
+        if genes is not None:
+            self.linear.weight = clone_parameter(genes['weight_1'])
+            self.linear.bias = clone_parameter(genes['bias_1'])
+            self.linear2.weight = clone_parameter(genes['weight_2'])
+            self.linear2.bias = clone_parameter(genes['bias_2'])
 
     def forward(self, neighbors):
         inps = neighbors.unsqueeze(0)
-        if self.prev_state != None:
+        if self.prev_state is not None:
             all_imps = torch.cat((inps, self.prev_state), dim=-1)
         else:
-            all_imps = torch.cat((inps, torch.zeros(1, 1, 9)), dim=-1)
+            state = torch.zeros(1, 1, 9, dtype=inps.dtype, device=inps.device)
+            all_imps = torch.cat((inps, state), dim=-1)
         lin1 = self.relu(self.linear(all_imps))
-        self.prev_state = lin1
+        self.prev_state = lin1.detach()
         lin2 = self.linear2(lin1)
 
         self.pos_list.append(self.pos)
@@ -80,7 +159,7 @@ class Cell(nn.Module):
         return lin2.argmax()
 
     def update_pos(self, pos):
-        self.pos = pos if str(type(pos)) != "<class 'numpy.ndarray'>" else pos.tolist()
+        self.pos = pos.tolist() if isinstance(pos, np.ndarray) else list(pos)
                     
             
 
@@ -93,10 +172,7 @@ class Cell(nn.Module):
             }
 
     def add_health(self, amount=1):
-        if self.health < self.max_health:
-            if amount > 1:
-                amount = amount if amount + self.health <= self.max_health else self.max_health - self.health
-            self.health += amount
+        self.health = min(self.max_health, self.health + amount)
 
     def total_parameters(self):
         return sum(p.numel() for p in self.parameters() if p.requires_grad)
@@ -104,6 +180,11 @@ class Cell(nn.Module):
 
 def random_spawn(game):
     '''returns a random position in the grid that is not occupied'''
+    if len(empty_positions(game)) == 0:
+        raise RuntimeError('No Empty Positions Available')
+    # Keep the original rejection-sampling draw order so seeded runs match the
+    # interactive simulation as closely as possible. The pre-check only prevents
+    # an infinite loop when the grid is full.
     while True:
         pos = np.array([np.random.randint(2, game.size.lines), np.random.randint(2, game.size.columns+2)])
         if game.grid[pos[0], pos[1]] == 0:
@@ -113,8 +194,8 @@ class Game():
     '''
     Manages Game State
     '''
-    def __init__(self, genepool=None):
-        self.size = os.get_terminal_size()
+    def __init__(self, genepool=None, size=None):
+        self.size = terminal_size(size)
         self.grid = np.zeros((self.size.lines+2, self.size.columns+4))
         # set the 2 layer border as -1's (each cell has a vision of 4x4 hence border to avoid out of bounds)
         self.grid[:, 0:2] = -1
@@ -135,16 +216,21 @@ class Game():
             return False
 
     def update_cell(self, y, x, new, cell=None):
-        if [*new] == [20, 213]:
-            raise Exception('fuck')
-        if cell == None:
+        new = [int(new[0]), int(new[1])]
+        if cell is None:
             cell = self.get_cell(y, x)
             if cell == False:
                 raise Exception('Cell Does not Exist at this Position')
+        occupant = self.get_cell(*new)
+        if occupant is not False and occupant is not cell:
+            raise Exception('New Position is Occupied')
+        if self.grid[new[0], new[1]] == -1:
+            raise Exception('New Position is Outside the Play Area')
        
-        cell.update_pos([new[0], new[1]])
+        cell.update_pos(new)
         self.grid[new[0], new[1]] = 1
-        self.grid[y][x] = 0
+        if [y, x] != new:
+            self.grid[y][x] = 0
 
     def remove_cell(self, y, x): 
         #self.graveyard.append(self.get_cell(y, x)) # change so cell is passed in
@@ -152,14 +238,17 @@ class Game():
         self.cells = [c for c in self.cells if c.pos != [y, x]]
 
     def damage_cell(self, cell):
+        if cell == False or cell not in self.cells:
+            return False
         cell.health -= 1
-        if cell.health == 0:
+        if cell.health <= 0:
             self.remove_cell(*cell.pos)
             return True
-        else:
-            False
+        return False
 
     def add_cell(self, y, x, genes=None):
+        if self.grid[y][x] != 0:
+            raise Exception('Cannot Add Cell to a Non-Empty Position')
         self.grid[y][x] = 1
         self.cells.append(Cell([y, x], genes))
 
@@ -171,7 +260,7 @@ class Game():
         
         if np.random.rand() < 0.05:
             # get the surrounding positions
-            neighbors = [cell.pos + direction_dict[i](cell.pos) for i in range(1,9)] # wow clever copilot
+            neighbors = [direction_dict[i](cell.pos) for i in range(1,9)]
             ncells = [self.get_cell(*n) for n in neighbors]
             ncells = [c for c in ncells if c != False]
             if len(ncells) != 0:
@@ -179,54 +268,140 @@ class Game():
                 # combine the genes 
                 new_genes = {}
                 for k in genes[0].keys():
-                    new_genes[k] = torch.mean(torch.stack([g[k] for g in genes]), axis=0)
+                    new_genes[k] = torch.mean(torch.stack([g[k] for g in genes]), dim=0)
                 # alter the genes of the cell through linear combination and add random noise with a small guassian
-                weight1 = nn.Parameter((cell.linear.weight * 0.8 + new_genes['weight_1'] * 0.2) + torch.randn(cell.linear.weight.shape) * 0.1)
-                bias1 = nn.Parameter((cell.linear.bias * 0.8 + new_genes['bias_1'] * 0.2) + torch.randn(cell.linear.bias.shape) * 0.1)
-                weight2 = nn.Parameter((cell.linear2.weight * 0.8 + new_genes['weight_2'] * 0.2) + torch.randn(cell.linear2.weight.shape) * 0.1)
-                bias2 = nn.Parameter((cell.linear2.bias * 0.8 + new_genes['bias_2'] * 0.2) + torch.randn(cell.linear2.bias.shape) * 0.1)
+                weight1 = cell.linear.weight * 0.8 + new_genes['weight_1'] * 0.2 + torch.randn_like(cell.linear.weight) * 0.1
+                bias1 = cell.linear.bias * 0.8 + new_genes['bias_1'] * 0.2 + torch.randn_like(cell.linear.bias) * 0.1
+                weight2 = cell.linear2.weight * 0.8 + new_genes['weight_2'] * 0.2 + torch.randn_like(cell.linear2.weight) * 0.1
+                bias2 = cell.linear2.bias * 0.8 + new_genes['bias_2'] * 0.2 + torch.randn_like(cell.linear2.bias) * 0.1
             else:
-                weight1 = nn.Parameter(cell.linear.weight + torch.randn(cell.linear.weight.shape) * 0.001)
-                bias1 = nn.Parameter(cell.linear.bias + torch.randn(cell.linear.bias.shape) * 0.001)   
-                weight2 = nn.Parameter(cell.linear2.weight + torch.randn(cell.linear2.weight.shape) * 0.001)
-                bias2 = nn.Parameter(cell.linear2.bias + torch.randn(cell.linear2.bias.shape) * 0.001)
+                weight1 = cell.linear.weight + torch.randn_like(cell.linear.weight) * 0.001
+                bias1 = cell.linear.bias + torch.randn_like(cell.linear.bias) * 0.001
+                weight2 = cell.linear2.weight + torch.randn_like(cell.linear2.weight) * 0.001
+                bias2 = cell.linear2.bias + torch.randn_like(cell.linear2.bias) * 0.001
+        # This intentionally remains a second RNG draw, matching the original
+        # probability path. Collapsing it into one draw changes seeded dynamics.
         elif np.random.rand() < 0.4:
-            weight1 = cell.linear.weight + torch.randn(cell.linear.weight.shape) * 0.00001
-            bias1 = cell.linear.bias + torch.randn(cell.linear.bias.shape) * 0.00001
-            weight2 = cell.linear2.weight + torch.randn(cell.linear2.weight.shape) * 0.00001
-            bias2 = cell.linear2.bias  + torch.randn(cell.linear2.bias.shape) * 0.00001
+            weight1 = cell.linear.weight + torch.randn_like(cell.linear.weight) * 0.00001
+            bias1 = cell.linear.bias + torch.randn_like(cell.linear.bias) * 0.00001
+            weight2 = cell.linear2.weight + torch.randn_like(cell.linear2.weight) * 0.00001
+            bias2 = cell.linear2.bias + torch.randn_like(cell.linear2.bias) * 0.00001
         else:
             # no mutation
-            weight1 = cell.linear.weight
-            bias1 = cell.linear.bias
-            weight2 = cell.linear2.weight
-            bias2 = cell.linear2.bias
+            weight1 = cell.linear.weight.detach().clone()
+            bias1 = cell.linear.bias.detach().clone()
+            weight2 = cell.linear2.weight.detach().clone()
+            bias2 = cell.linear2.bias.detach().clone()
         return {'weight_1': weight1, 'bias_1': bias1,
                 'weight_2': weight2, 'bias_2': bias2}
 
 
-def print_grid(game):
+def render_grid(game, styled=True):
     # skip the 2 layer border
+    rows = []
     for row in range(2, game.size.lines):
-        pstring = [BLANK]*game.size.columns
+        pstring = [BLANK if styled else ' ']*game.size.columns
         cells_row = game.grid[row]
         #if sum(cells_row) != 0: # doesn't account for padding
         for col in range(2, game.size.columns + 2):
             if cells_row[col] == 1:
                 color = int((87 - 4*np.sum(game.grid[row-1:row+2,col-1:col+2])) % 255) # color is based on density of cells # could remove -1's to account for border padding
-                pstring[col - 2] = f'{fg(color)}{X}{fg.rs}' # -2 to account for skipped iteration from the two layer border
-        print(''.join(pstring))
+                pstring[col - 2] = f'{fg(color)}{X}{fg.rs}' if styled else '#'
+        rows.append(''.join(pstring))
+    return '\n'.join(rows)
+
+
+def print_grid(game):
+    print(render_grid(game))
+
+
+def render_frame(game, countdown):
+    return f'{render_grid(game)}\n{status_line(game, countdown)}'
+
+
+def draw_frame(game, countdown, first_frame=False):
+    # Redraw in-place instead of shelling out to clear. One buffered write per
+    # frame prevents most flicker while still drawing every simulation frame.
+    if first_frame:
+        cls()
+    elif os.getenv('TERM'):
+        sys.stdout.write('\033[H')
+    sys.stdout.write(render_frame(game, countdown))
+    sys.stdout.write('\033[J\n')
+    sys.stdout.flush()
+
+
+def status_line(game, countdown, styled=True):
+    totalcells = len(game.cells)
+    if totalcells == 0:
+        avghealth = 0
+        maxhealth = 0
+        maxage = 0
+    else:
+        avghealth = round(sum([c.health for c in game.cells]) / totalcells)
+        maxhealth = max([c.health for c in game.cells])
+        maxage = max([c.age for c in game.cells])
+
+    if not styled:
+        return (
+            f'Petri Dish      AVG HP: {avghealth}   MAX HP: {maxhealth}    '
+            f'Total Players: {totalcells}   Oldest Cell: {maxage}   '
+            f'Total Rounds: {game.rounds}    Countdown: {countdown}'
+        )
+
+    return (
+        f'{fg.red}Petri Dish{fg.rs}{fg.green}      AVG HP: {avghealth}   '
+        f'MAX HP: {maxhealth}{fg.rs}    {fg.white}Total Players: {totalcells}'
+        f'{fg.rs}   {fg.red}Oldest Cell: {maxage}   Total Rounds: {game.rounds}'
+        f'{fg.rs}    {fg.blue}Countdown: {countdown}{fg.rs}'
+    )
+
+
+def write_snapshot(game, countdown, frame, snapshot_dir):
+    snapshot_dir = Path(snapshot_dir)
+    snapshot_dir.mkdir(parents=True, exist_ok=True)
+    snapshot = [
+        f'Frame: {frame}',
+        status_line(game, countdown, styled=False),
+        render_grid(game, styled=False),
+        '',
+    ]
+    path = snapshot_dir / f'frame_{frame:05d}.txt'
+    path.write_text('\n'.join(snapshot), encoding='utf-8')
+    return path
+
+
+def advance_round(game, countdown):
+    if countdown == 0:
+        totalcells = len(game.cells)
+        maxage = max([c.age for c in game.cells]) if game.cells else 0
+        game = init(game, num=max(PER_WAVE - totalcells, MIN_WAVE))
+        countdown = ROUNDTIME
+        game.rounds += 1
+
+        if totalcells > MAX_TOTAL:
+            game = prune(game) # prune the game if it is too big
+        for cell in game.cells:
+            cell.age += 1
+            if cell.age == maxage:
+                cell.add_health()
+    return game, countdown
 
 
 def step(game):
-    for cell in game.cells:
+    # Iterate over a snapshot because combat can remove cells before their turn.
+    # The membership check preserves the original order for surviving cells while
+    # preventing removed cells from acting later in the same frame.
+    for cell in list(game.cells):
+        if cell not in game.cells:
+            continue
         y, x = cell.pos
         # get the surrounding positions
         neighbors = np.delete(game.grid[y-2:y+3, x-2:x+3].reshape(-1), 12, 0) 
         if neighbors.shape[0] != 24:
-            print(game.grid[y-2:y+3, x-2:x+3])
-            print(game.grid[20, 213])
-        action = cell(torch.tensor([neighbors], dtype=torch.float32)).int().tolist()
+            raise RuntimeError(f'Expected 24 Neighbor Inputs, Got {neighbors.shape[0]}')
+        neighbor_tensor = torch.from_numpy(neighbors.astype(np.float32, copy=False)).unsqueeze(0)
+        action = cell(neighbor_tensor).int().tolist()
 
         if action != 0:
             new_loc = direction_dict[action]([y, x])
@@ -267,8 +442,12 @@ def step(game):
 
 def init(game, num=2500):
     total_in_game = len(game.cells)
+    num = min(num, len(empty_positions(game)))
     for i in range(num):
         new_cell = random_spawn(game)
+        # Preserve the original startup behavior: when the dish begins empty,
+        # every initial cell is independently random. Only later wave spawns
+        # mutate from the cells that existed before the wave started.
         if total_in_game == 0:
             game.add_cell(*new_cell)
         else:
@@ -292,43 +471,49 @@ def prune(game):
 
 
 def main(args):
+    seed_all(args.seed)
     with torch.no_grad():
         if args.load:
-            game = pickle.load(open(args.load, 'rb'))
+            game = load_state(args.load)
         else:
-            game = init(Game())
+            game = init(Game(size=args.size), num=args.initial_cells)
 
         countdown = ROUNDTIME
-        while True:
-            try:
-                cls()
-                print_grid(game)
-                avghealth = round(sum([c.health for c in game.cells]) / len(game.cells))
-                maxhealth = max([c.health for c in game.cells])
-                maxage = max([c.age for c in game.cells])
-                totalcells = len(game.cells)
-                print(f'{fg.red}Petri Dish{fg.rs}{fg.green}      AVG HP: {avghealth}   MAX HP: {maxhealth}{fg.rs}    {fg.white}Total Players: {totalcells}{fg.rs}   {fg.red}Oldest Cell: {maxage}   Total Rounds: {game.rounds}{fg.rs}    {fg.blue}Countdown: {countdown}{fg.rs}')
-                if countdown == 0:
-                    game = init(game, num=max(PER_WAVE - totalcells, MIN_WAVE))
-                    countdown = ROUNDTIME
-                    game.rounds += 1
+        frame = 0
+        cursor_hidden = not args.no_render
+        if cursor_hidden:
+            hide_cursor()
+        try:
+            while args.max_frames is None or frame < args.max_frames:
+                try:
+                    if len(game.cells) == 0:
+                        game = init(game, num=MIN_WAVE)
+                    # Snapshot flags are for bounded tests/reviews only. They run
+                    # before step(), matching what a user sees rendered each frame.
+                    if args.snapshot_dir and frame % args.snapshot_every == 0:
+                        write_snapshot(game, countdown, frame, args.snapshot_dir)
+                    if not args.no_render:
+                        draw_frame(game, countdown, first_frame=(frame == 0))
+                    game, countdown = advance_round(game, countdown)
 
-                    if totalcells > MAX_TOTAL:
-                        game = prune(game) # prune the game if it is too big
-                    for cell in game.cells:
-                        cell.age += 1
-                        if cell.age == maxage:
-                            cell.add_health()
+                    if args.frame_rate > 0:
+                        time.sleep(args.frame_rate)
+                    game = step(game)
+                    countdown -= 1
+                    frame += 1
 
-                time.sleep(FRAME_RATE)
-                game = step(game)
-                countdown -= 1
-
-            except KeyboardInterrupt:
-                print('Saving...')
-                save_state(game, args.save)
-                print('Saved!')
-                break
+                except KeyboardInterrupt:
+                    if cursor_hidden:
+                        show_cursor()
+                    print('Saving...')
+                    save_state(game, args.save)
+                    print('Saved!')
+                    break
+        finally:
+            if cursor_hidden:
+                show_cursor()
+        if args.save_on_complete:
+            save_state(game, args.save)
 
 def save_state(game, name):
     with open(name, 'wb') as f:
@@ -345,6 +530,15 @@ if __name__ == '__main__':
     parser = argparse.ArgumentParser(description='Petri Dish')
     parser.add_argument('--load', help='load a saved state', default=False)
     parser.add_argument('--save', help='save the state', default='state.pkl')
+    parser.add_argument('--save-on-complete', action='store_true', help='save when a bounded run finishes')
+    parser.add_argument('--seed', type=int, help='seed Python, NumPy, and PyTorch RNGs')
+    parser.add_argument('--size', type=parse_size, help='grid size as LINESxCOLUMNS, for example 24x80')
+    parser.add_argument('--initial-cells', type=positive_int, default=2500, help='number of cells to spawn initially')
+    parser.add_argument('--max-frames', type=positive_int, help='stop after this many frames')
+    parser.add_argument('--snapshot-dir', help='write plain-text frame snapshots to this directory')
+    parser.add_argument('--snapshot-every', type=positive_int, default=1, help='write one snapshot every N frames')
+    parser.add_argument('--no-render', action='store_true', help='do not render frames to the terminal')
+    parser.add_argument('--frame-rate', type=float, default=FRAME_RATE, help='seconds to sleep between frames')
     args = parser.parse_args()
 
     main(args)

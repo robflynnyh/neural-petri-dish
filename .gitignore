@@ -5,3 +5,4 @@ venv/
 env/
 *.pkl
 state.pkl
+test_cases/artifacts/
