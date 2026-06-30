@@ -236,3 +236,45 @@ def test_cli_bounded_run_writes_snapshots(tmp_path):
     assert 'Frame: 0' in first_snapshot
     assert 'Petri Dish' in first_snapshot
     assert '#' in first_snapshot
+
+
+def test_video_renderer_writes_artifact_and_manifest(tmp_path):
+    script = Path(__file__).resolve().parent / 'render_video.py'
+    output = tmp_path / 'preview.mp4'
+    result = subprocess.run(
+        [
+            sys.executable,
+            str(script),
+            '--output',
+            str(output),
+            '--render-rounds',
+            '2',
+            '--round-stride',
+            '2',
+            '--fps',
+            '10',
+            '--size',
+            '5x5',
+            '--initial-cells',
+            '4',
+            '--seed',
+            '7',
+            '--cell-size',
+            '4',
+            '--write-manifest',
+        ],
+        capture_output=True,
+        text=True,
+        timeout=30,
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert output.exists()
+    assert output.stat().st_size > 0
+    manifest = output.with_suffix(output.suffix + '.manifest.txt')
+    assert manifest.exists()
+    manifest_text = manifest.read_text(encoding='utf-8')
+    assert 'render_rounds: 2' in manifest_text
+    assert 'round_stride: 2' in manifest_text
+    assert 'frames_written: 1001' in manifest_text
+    assert 'rendered_rounds: 0,2' in manifest_text
