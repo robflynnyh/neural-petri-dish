@@ -13,19 +13,19 @@ pip install -r requirements.txt
 Start a new simulation:
 
 ```bash
-python neural_petri_dish_2.py
+python neural_petri_dish.py
 ```
 
 Save state on exit with `Ctrl+C`:
 
 ```bash
-python neural_petri_dish_2.py --save state.pkl
+python neural_petri_dish.py --save state.pkl
 ```
 
 Resume a saved simulation:
 
 ```bash
-python neural_petri_dish_2.py --load state.pkl --save state.pkl
+python neural_petri_dish.py --load state.pkl --save state.pkl
 ```
 
 ## Notes
