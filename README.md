@@ -59,8 +59,19 @@ python test_cases/render_video.py --output test_cases/artifacts/neural_petri_dis
 The video renderer runs the simulation headlessly and writes an MP4/GIF-style artifact without terminal rendering. Use `--frames`, `--render-rounds`, `--round-stride`, `--fps`, `--size`, `--initial-cells`, and `--seed` to make automated PR previews repeatable.
 Use `--render-rounds 5 --round-stride 4` to render every frame inside five full UI rounds sampled as rounds `0,4,8,12,16`; the skipped rounds still run headlessly.
 
+Compare mutation dynamics:
+
+```bash
+python test_cases/compare_mutation_modes.py --rounds 100 --render-every-rounds 10
+```
+
+This writes one video per mutation mode, a per-round CSV with pre-refill survivor counts and previous-round survival rates, and a PNG comparison plot under `test_cases/artifacts/mutation_comparison/`.
+Use `--action-mode simultaneous` to batch action proposal inference first, then resolve movement and combat conflicts from the frozen pre-frame grid.
+
 ## Notes
 
 - The simulation uses the current terminal size to define the grid.
+- Mutated child cells use low-rank structured noise for matrix weights, inspired by EGGROLL-style factorized perturbations.
+- `shared_rank1` mutation spawns each new wave from one HP-weighted shared base genome plus per-cell rank-1 perturbations, which is designed to make action inference batchable.
 - Saved `*.pkl` state files are ignored by git.
 - Dependencies are `numpy`, `torch`, and `sty`.
