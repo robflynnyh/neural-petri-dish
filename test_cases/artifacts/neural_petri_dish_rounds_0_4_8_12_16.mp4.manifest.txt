@@ -1,0 +1,13 @@
+Neural Petri Dish video artifact
+
+output: test_cases/artifacts/neural_petri_dish_rounds_0_4_8_12_16.mp4
+frames: off
+render_rounds: 5
+round_stride: 4
+frames_written: 2501
+fps: 30
+size: 18x60
+initial_cells: 300
+seed: 7
+cell_size: 8
+rendered_rounds: 0,4,8,12,16

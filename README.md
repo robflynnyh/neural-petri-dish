@@ -50,6 +50,15 @@ python test_cases/vibe_snapshot_review.py
 
 This writes text snapshots under `test_cases/artifacts/` and asks `codex exec` to review them against `neural_petri_dish.py`. Use `--no-codex-review` to only collect snapshots, or `--reasoning xhigh` for a heavier Codex review pass.
 
+Render a video artifact for PRs:
+
+```bash
+python test_cases/render_video.py --output test_cases/artifacts/neural_petri_dish.mp4
+```
+
+The video renderer runs the simulation headlessly and writes an MP4/GIF-style artifact without terminal rendering. Use `--frames`, `--render-rounds`, `--round-stride`, `--fps`, `--size`, `--initial-cells`, and `--seed` to make automated PR previews repeatable.
+Use `--render-rounds 5 --round-stride 4` to render every frame inside five full UI rounds sampled as rounds `0,4,8,12,16`; the skipped rounds still run headlessly.
+
 ## Notes
 
 - The simulation uses the current terminal size to define the grid.
