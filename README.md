@@ -28,6 +28,20 @@ Resume a saved simulation:
 python neural_petri_dish.py --load state.pkl --save state.pkl
 ```
 
+## Tests
+
+Install the test dependencies:
+
+```bash
+pip install -r requirements-dev.txt
+```
+
+Run the test cases:
+
+```bash
+pytest test_cases
+```
+
 ## Notes
 
 - The simulation uses the current terminal size to define the grid.

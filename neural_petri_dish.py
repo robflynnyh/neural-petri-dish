@@ -1,22 +1,53 @@
 import numpy as np
-from numpy.lib.function_base import average, select
-from numpy.random import rand
 import torch
-from torch._C import Argument
 import torch.nn as nn
-import torch.nn.functional as F
-import os
-from sty import fg, bg, ef, rs
-import time
-import random
 import argparse
+import os
 import pickle
+import random
+import shutil
+import time
 
-import signal
-import sys
-# Weird errors where the cells can be in the same location and not die, and cells can move around in a weird way that constantly gives them health points
+try:
+    from sty import fg, bg
+except ModuleNotFoundError:
+    class _NoStyle:
+        rs = ''
 
-cls = lambda: os.system('clear') or None
+        def __call__(self, *_args, **_kwargs):
+            return ''
+
+        def __getattr__(self, _name):
+            return ''
+
+    fg = _NoStyle()
+    bg = _NoStyle()
+
+
+def cls():
+    if os.getenv('TERM'):
+        os.system('clear')
+
+
+def terminal_size(size=None):
+    if size is None:
+        return shutil.get_terminal_size(fallback=(80, 24))
+    if hasattr(size, 'lines') and hasattr(size, 'columns'):
+        return size
+    lines, columns = size
+    return os.terminal_size((columns, lines))
+
+
+def clone_parameter(tensor):
+    return nn.Parameter(tensor.detach().clone())
+
+
+def empty_positions(game):
+    play_area = game.grid[2:game.size.lines, 2:game.size.columns + 2]
+    positions = np.argwhere(play_area == 0)
+    return positions + np.array([2, 2])
+
+
 col = 16
 X = f'{bg(col)}❏{bg.rs}'# the icon for the cell *·◉ ○ ●○○✺✺
 BLANK = f'{bg(col)} {bg.rs}' # icon for empty cell °
@@ -43,7 +74,7 @@ class Cell(nn.Module):
         self.linear = nn.Linear(33, 9)
         self.relu = nn.ReLU()
         self.linear2 = nn.Linear(9, 9)
-        self.pos = pos
+        self.pos = list(pos)
         self.health = 2
         self.max_health = 15
         self.age = 0
@@ -52,20 +83,21 @@ class Cell(nn.Module):
 
         self.pos_list = []
 
-        if genes != None:
-            self.linear.weight = nn.Parameter(genes['weight_1'])
-            self.linear.bias = nn.Parameter(genes['bias_1'])
-            self.linear2.weight = nn.Parameter(genes['weight_2'])
-            self.linear2.bias = nn.Parameter(genes['bias_2'])
+        if genes is not None:
+            self.linear.weight = clone_parameter(genes['weight_1'])
+            self.linear.bias = clone_parameter(genes['bias_1'])
+            self.linear2.weight = clone_parameter(genes['weight_2'])
+            self.linear2.bias = clone_parameter(genes['bias_2'])
 
     def forward(self, neighbors):
         inps = neighbors.unsqueeze(0)
-        if self.prev_state != None:
+        if self.prev_state is not None:
             all_imps = torch.cat((inps, self.prev_state), dim=-1)
         else:
-            all_imps = torch.cat((inps, torch.zeros(1, 1, 9)), dim=-1)
+            state = torch.zeros(1, 1, 9, dtype=inps.dtype, device=inps.device)
+            all_imps = torch.cat((inps, state), dim=-1)
         lin1 = self.relu(self.linear(all_imps))
-        self.prev_state = lin1
+        self.prev_state = lin1.detach()
         lin2 = self.linear2(lin1)
 
         self.pos_list.append(self.pos)
@@ -80,7 +112,7 @@ class Cell(nn.Module):
         return lin2.argmax()
 
     def update_pos(self, pos):
-        self.pos = pos if str(type(pos)) != "<class 'numpy.ndarray'>" else pos.tolist()
+        self.pos = pos.tolist() if isinstance(pos, np.ndarray) else list(pos)
                     
             
 
@@ -93,10 +125,7 @@ class Cell(nn.Module):
             }
 
     def add_health(self, amount=1):
-        if self.health < self.max_health:
-            if amount > 1:
-                amount = amount if amount + self.health <= self.max_health else self.max_health - self.health
-            self.health += amount
+        self.health = min(self.max_health, self.health + amount)
 
     def total_parameters(self):
         return sum(p.numel() for p in self.parameters() if p.requires_grad)
@@ -104,17 +133,17 @@ class Cell(nn.Module):
 
 def random_spawn(game):
     '''returns a random position in the grid that is not occupied'''
-    while True:
-        pos = np.array([np.random.randint(2, game.size.lines), np.random.randint(2, game.size.columns+2)])
-        if game.grid[pos[0], pos[1]] == 0:
-            return pos
+    positions = empty_positions(game)
+    if len(positions) == 0:
+        raise RuntimeError('No Empty Positions Available')
+    return positions[np.random.randint(len(positions))]
 
 class Game():
     '''
     Manages Game State
     '''
-    def __init__(self, genepool=None):
-        self.size = os.get_terminal_size()
+    def __init__(self, genepool=None, size=None):
+        self.size = terminal_size(size)
         self.grid = np.zeros((self.size.lines+2, self.size.columns+4))
         # set the 2 layer border as -1's (each cell has a vision of 4x4 hence border to avoid out of bounds)
         self.grid[:, 0:2] = -1
@@ -135,16 +164,21 @@ class Game():
             return False
 
     def update_cell(self, y, x, new, cell=None):
-        if [*new] == [20, 213]:
-            raise Exception('fuck')
-        if cell == None:
+        new = [int(new[0]), int(new[1])]
+        if cell is None:
             cell = self.get_cell(y, x)
             if cell == False:
                 raise Exception('Cell Does not Exist at this Position')
+        occupant = self.get_cell(*new)
+        if occupant is not False and occupant is not cell:
+            raise Exception('New Position is Occupied')
+        if self.grid[new[0], new[1]] == -1:
+            raise Exception('New Position is Outside the Play Area')
        
-        cell.update_pos([new[0], new[1]])
+        cell.update_pos(new)
         self.grid[new[0], new[1]] = 1
-        self.grid[y][x] = 0
+        if [y, x] != new:
+            self.grid[y][x] = 0
 
     def remove_cell(self, y, x): 
         #self.graveyard.append(self.get_cell(y, x)) # change so cell is passed in
@@ -152,14 +186,17 @@ class Game():
         self.cells = [c for c in self.cells if c.pos != [y, x]]
 
     def damage_cell(self, cell):
+        if cell == False or cell not in self.cells:
+            return False
         cell.health -= 1
-        if cell.health == 0:
+        if cell.health <= 0:
             self.remove_cell(*cell.pos)
             return True
-        else:
-            False
+        return False
 
     def add_cell(self, y, x, genes=None):
+        if self.grid[y][x] != 0:
+            raise Exception('Cannot Add Cell to a Non-Empty Position')
         self.grid[y][x] = 1
         self.cells.append(Cell([y, x], genes))
 
@@ -169,9 +206,10 @@ class Game():
         '''
         # 10% chance of mutation
         
-        if np.random.rand() < 0.05:
+        roll = np.random.rand()
+        if roll < 0.05:
             # get the surrounding positions
-            neighbors = [cell.pos + direction_dict[i](cell.pos) for i in range(1,9)] # wow clever copilot
+            neighbors = [direction_dict[i](cell.pos) for i in range(1,9)]
             ncells = [self.get_cell(*n) for n in neighbors]
             ncells = [c for c in ncells if c != False]
             if len(ncells) != 0:
@@ -179,28 +217,28 @@ class Game():
                 # combine the genes 
                 new_genes = {}
                 for k in genes[0].keys():
-                    new_genes[k] = torch.mean(torch.stack([g[k] for g in genes]), axis=0)
+                    new_genes[k] = torch.mean(torch.stack([g[k] for g in genes]), dim=0)
                 # alter the genes of the cell through linear combination and add random noise with a small guassian
-                weight1 = nn.Parameter((cell.linear.weight * 0.8 + new_genes['weight_1'] * 0.2) + torch.randn(cell.linear.weight.shape) * 0.1)
-                bias1 = nn.Parameter((cell.linear.bias * 0.8 + new_genes['bias_1'] * 0.2) + torch.randn(cell.linear.bias.shape) * 0.1)
-                weight2 = nn.Parameter((cell.linear2.weight * 0.8 + new_genes['weight_2'] * 0.2) + torch.randn(cell.linear2.weight.shape) * 0.1)
-                bias2 = nn.Parameter((cell.linear2.bias * 0.8 + new_genes['bias_2'] * 0.2) + torch.randn(cell.linear2.bias.shape) * 0.1)
+                weight1 = cell.linear.weight * 0.8 + new_genes['weight_1'] * 0.2 + torch.randn_like(cell.linear.weight) * 0.1
+                bias1 = cell.linear.bias * 0.8 + new_genes['bias_1'] * 0.2 + torch.randn_like(cell.linear.bias) * 0.1
+                weight2 = cell.linear2.weight * 0.8 + new_genes['weight_2'] * 0.2 + torch.randn_like(cell.linear2.weight) * 0.1
+                bias2 = cell.linear2.bias * 0.8 + new_genes['bias_2'] * 0.2 + torch.randn_like(cell.linear2.bias) * 0.1
             else:
-                weight1 = nn.Parameter(cell.linear.weight + torch.randn(cell.linear.weight.shape) * 0.001)
-                bias1 = nn.Parameter(cell.linear.bias + torch.randn(cell.linear.bias.shape) * 0.001)   
-                weight2 = nn.Parameter(cell.linear2.weight + torch.randn(cell.linear2.weight.shape) * 0.001)
-                bias2 = nn.Parameter(cell.linear2.bias + torch.randn(cell.linear2.bias.shape) * 0.001)
-        elif np.random.rand() < 0.4:
-            weight1 = cell.linear.weight + torch.randn(cell.linear.weight.shape) * 0.00001
-            bias1 = cell.linear.bias + torch.randn(cell.linear.bias.shape) * 0.00001
-            weight2 = cell.linear2.weight + torch.randn(cell.linear2.weight.shape) * 0.00001
-            bias2 = cell.linear2.bias  + torch.randn(cell.linear2.bias.shape) * 0.00001
+                weight1 = cell.linear.weight + torch.randn_like(cell.linear.weight) * 0.001
+                bias1 = cell.linear.bias + torch.randn_like(cell.linear.bias) * 0.001
+                weight2 = cell.linear2.weight + torch.randn_like(cell.linear2.weight) * 0.001
+                bias2 = cell.linear2.bias + torch.randn_like(cell.linear2.bias) * 0.001
+        elif roll < 0.45:
+            weight1 = cell.linear.weight + torch.randn_like(cell.linear.weight) * 0.00001
+            bias1 = cell.linear.bias + torch.randn_like(cell.linear.bias) * 0.00001
+            weight2 = cell.linear2.weight + torch.randn_like(cell.linear2.weight) * 0.00001
+            bias2 = cell.linear2.bias + torch.randn_like(cell.linear2.bias) * 0.00001
         else:
             # no mutation
-            weight1 = cell.linear.weight
-            bias1 = cell.linear.bias
-            weight2 = cell.linear2.weight
-            bias2 = cell.linear2.bias
+            weight1 = cell.linear.weight.detach().clone()
+            bias1 = cell.linear.bias.detach().clone()
+            weight2 = cell.linear2.weight.detach().clone()
+            bias2 = cell.linear2.bias.detach().clone()
         return {'weight_1': weight1, 'bias_1': bias1,
                 'weight_2': weight2, 'bias_2': bias2}
 
@@ -219,14 +257,16 @@ def print_grid(game):
 
 
 def step(game):
-    for cell in game.cells:
+    for cell in list(game.cells):
+        if cell not in game.cells:
+            continue
         y, x = cell.pos
         # get the surrounding positions
         neighbors = np.delete(game.grid[y-2:y+3, x-2:x+3].reshape(-1), 12, 0) 
         if neighbors.shape[0] != 24:
-            print(game.grid[y-2:y+3, x-2:x+3])
-            print(game.grid[20, 213])
-        action = cell(torch.tensor([neighbors], dtype=torch.float32)).int().tolist()
+            raise RuntimeError(f'Expected 24 Neighbor Inputs, Got {neighbors.shape[0]}')
+        neighbor_tensor = torch.from_numpy(neighbors.astype(np.float32, copy=False)).unsqueeze(0)
+        action = cell(neighbor_tensor).int().tolist()
 
         if action != 0:
             new_loc = direction_dict[action]([y, x])
@@ -266,15 +306,14 @@ def step(game):
 
 
 def init(game, num=2500):
-    total_in_game = len(game.cells)
+    num = min(num, len(empty_positions(game)))
     for i in range(num):
         new_cell = random_spawn(game)
-        if total_in_game == 0:
+        if len(game.cells) == 0:
             game.add_cell(*new_cell)
         else:
             cell = random.choice(game.cells)
             game.add_cell(*new_cell, genes=game.mutate(cell))
-            total_in_game -= 1
 
     return game
 
@@ -301,6 +340,8 @@ def main(args):
         countdown = ROUNDTIME
         while True:
             try:
+                if len(game.cells) == 0:
+                    game = init(game, num=MIN_WAVE)
                 cls()
                 print_grid(game)
                 avghealth = round(sum([c.health for c in game.cells]) / len(game.cells))
