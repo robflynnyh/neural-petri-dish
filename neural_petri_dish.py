@@ -7,6 +7,7 @@ from pathlib import Path
 import pickle
 import random
 import shutil
+import sys
 import time
 
 try:
@@ -27,7 +28,20 @@ except ModuleNotFoundError:
 
 def cls():
     if os.getenv('TERM'):
-        os.system('clear')
+        sys.stdout.write('\033[2J\033[H')
+        sys.stdout.flush()
+
+
+def hide_cursor():
+    if os.getenv('TERM'):
+        sys.stdout.write('\033[?25l')
+        sys.stdout.flush()
+
+
+def show_cursor():
+    if os.getenv('TERM'):
+        sys.stdout.write('\033[?25h')
+        sys.stdout.flush()
 
 
 def terminal_size(size=None):
@@ -301,6 +315,22 @@ def print_grid(game):
     print(render_grid(game))
 
 
+def render_frame(game, countdown):
+    return f'{render_grid(game)}\n{status_line(game, countdown)}'
+
+
+def draw_frame(game, countdown, first_frame=False):
+    # Redraw in-place instead of shelling out to clear. One buffered write per
+    # frame prevents most flicker while still drawing every simulation frame.
+    if first_frame:
+        cls()
+    elif os.getenv('TERM'):
+        sys.stdout.write('\033[H')
+    sys.stdout.write(render_frame(game, countdown))
+    sys.stdout.write('\033[J\n')
+    sys.stdout.flush()
+
+
 def status_line(game, countdown, styled=True):
     totalcells = len(game.cells)
     if totalcells == 0:
@@ -450,32 +480,38 @@ def main(args):
 
         countdown = ROUNDTIME
         frame = 0
-        while args.max_frames is None or frame < args.max_frames:
-            try:
-                if len(game.cells) == 0:
-                    game = init(game, num=MIN_WAVE)
-                # Snapshot flags are for bounded tests/reviews only. They run
-                # before step(), matching what a user sees rendered each frame.
-                if args.snapshot_dir and frame % args.snapshot_every == 0:
-                    write_snapshot(game, countdown, frame, args.snapshot_dir)
-                if not args.no_render:
-                    cls()
-                    print_grid(game)
-                    print(status_line(game, countdown))
-                game, countdown = advance_round(game, countdown)
+        cursor_hidden = not args.no_render
+        if cursor_hidden:
+            hide_cursor()
+        try:
+            while args.max_frames is None or frame < args.max_frames:
+                try:
+                    if len(game.cells) == 0:
+                        game = init(game, num=MIN_WAVE)
+                    # Snapshot flags are for bounded tests/reviews only. They run
+                    # before step(), matching what a user sees rendered each frame.
+                    if args.snapshot_dir and frame % args.snapshot_every == 0:
+                        write_snapshot(game, countdown, frame, args.snapshot_dir)
+                    if not args.no_render:
+                        draw_frame(game, countdown, first_frame=(frame == 0))
+                    game, countdown = advance_round(game, countdown)
 
-                if args.frame_rate > 0:
-                    time.sleep(args.frame_rate)
-                game = step(game)
-                countdown -= 1
-                frame += 1
+                    if args.frame_rate > 0:
+                        time.sleep(args.frame_rate)
+                    game = step(game)
+                    countdown -= 1
+                    frame += 1
 
-            except KeyboardInterrupt:
-                print('Saving...')
-                save_state(game, args.save)
-                print('Saved!')
-                break
-
+                except KeyboardInterrupt:
+                    if cursor_hidden:
+                        show_cursor()
+                    print('Saving...')
+                    save_state(game, args.save)
+                    print('Saved!')
+                    break
+        finally:
+            if cursor_hidden:
+                show_cursor()
         if args.save_on_complete:
             save_state(game, args.save)
 
