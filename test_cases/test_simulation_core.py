@@ -42,12 +42,52 @@ def test_init_caps_spawn_count_to_available_positions():
     assert len(npd.empty_positions(game)) == 0
 
 
+def test_initial_empty_game_spawn_keeps_random_independent_genes(monkeypatch):
+    game = npd.Game(size=(6, 6))
+
+    def fail_mutate(_game, _cell):
+        raise AssertionError('empty initial spawn should not mutate from the first cell')
+
+    monkeypatch.setattr(npd.Game, 'mutate', fail_mutate)
+
+    npd.init(game, num=8)
+
+    assert len(game.cells) == 8
+
+
+def test_wave_spawn_mutates_only_preexisting_cell_count(monkeypatch):
+    game = npd.Game(size=(6, 6))
+    game.add_cell(2, 2)
+    mutate_calls = []
+
+    def count_mutate(_game, cell):
+        mutate_calls.append(cell)
+        return cell.get_genes()
+
+    monkeypatch.setattr(npd.Game, 'mutate', count_mutate)
+
+    npd.init(game, num=5)
+
+    assert len(game.cells) == 6
+    assert len(mutate_calls) == 1
+
+
 def test_random_spawn_raises_when_grid_is_full():
     game = npd.Game(size=(3, 3))
     npd.init(game, num=999)
 
     with pytest.raises(RuntimeError, match='No Empty Positions Available'):
         npd.random_spawn(game)
+
+
+def test_random_spawn_preserves_coordinate_draw_path(monkeypatch):
+    game = npd.Game(size=(6, 6))
+    draws = iter([3, 4])
+    monkeypatch.setattr(npd.np.random, 'randint', lambda *_args: next(draws))
+
+    pos = npd.random_spawn(game)
+
+    assert pos.tolist() == [3, 4]
 
 
 def test_add_cell_rejects_occupied_position():
@@ -131,6 +171,21 @@ def test_mutation_uses_actual_neighbor_positions(monkeypatch):
     assert torch.allclose(genes['bias_1'], torch.full_like(parent.linear.bias, 4.0))
     assert torch.allclose(genes['weight_2'], torch.full_like(parent.linear2.weight, 6.0))
     assert torch.allclose(genes['bias_2'], torch.full_like(parent.linear2.bias, 8.0))
+
+
+def test_light_mutation_preserves_original_second_random_draw(monkeypatch):
+    cell = npd.Cell([3, 3])
+    game = npd.Game(size=(6, 6))
+    rolls = iter([0.5, 0.0])
+    monkeypatch.setattr(npd.np.random, 'rand', lambda: next(rolls))
+    monkeypatch.setattr(npd.torch, 'randn_like', lambda tensor: torch.ones_like(tensor))
+
+    genes = game.mutate(cell)
+
+    assert torch.allclose(genes['weight_1'], cell.linear.weight + 0.00001)
+    assert torch.allclose(genes['bias_1'], cell.linear.bias + 0.00001)
+    assert torch.allclose(genes['weight_2'], cell.linear2.weight + 0.00001)
+    assert torch.allclose(genes['bias_2'], cell.linear2.bias + 0.00001)
 
 
 def test_cell_genes_are_cloned_not_shared():

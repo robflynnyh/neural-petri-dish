@@ -32,7 +32,10 @@ def cls():
 
 def terminal_size(size=None):
     if size is None:
-        return shutil.get_terminal_size(fallback=(80, 24))
+        try:
+            return os.get_terminal_size()
+        except OSError:
+            return shutil.get_terminal_size(fallback=(80, 24))
     if hasattr(size, 'lines') and hasattr(size, 'columns'):
         return size
     lines, columns = size
@@ -163,10 +166,15 @@ class Cell(nn.Module):
 
 def random_spawn(game):
     '''returns a random position in the grid that is not occupied'''
-    positions = empty_positions(game)
-    if len(positions) == 0:
+    if len(empty_positions(game)) == 0:
         raise RuntimeError('No Empty Positions Available')
-    return positions[np.random.randint(len(positions))]
+    # Keep the original rejection-sampling draw order so seeded runs match the
+    # interactive simulation as closely as possible. The pre-check only prevents
+    # an infinite loop when the grid is full.
+    while True:
+        pos = np.array([np.random.randint(2, game.size.lines), np.random.randint(2, game.size.columns+2)])
+        if game.grid[pos[0], pos[1]] == 0:
+            return pos
 
 class Game():
     '''
@@ -236,8 +244,7 @@ class Game():
         '''
         # 10% chance of mutation
         
-        roll = np.random.rand()
-        if roll < 0.05:
+        if np.random.rand() < 0.05:
             # get the surrounding positions
             neighbors = [direction_dict[i](cell.pos) for i in range(1,9)]
             ncells = [self.get_cell(*n) for n in neighbors]
@@ -258,7 +265,9 @@ class Game():
                 bias1 = cell.linear.bias + torch.randn_like(cell.linear.bias) * 0.001
                 weight2 = cell.linear2.weight + torch.randn_like(cell.linear2.weight) * 0.001
                 bias2 = cell.linear2.bias + torch.randn_like(cell.linear2.bias) * 0.001
-        elif roll < 0.45:
+        # This intentionally remains a second RNG draw, matching the original
+        # probability path. Collapsing it into one draw changes seeded dynamics.
+        elif np.random.rand() < 0.4:
             weight1 = cell.linear.weight + torch.randn_like(cell.linear.weight) * 0.00001
             bias1 = cell.linear.bias + torch.randn_like(cell.linear.bias) * 0.00001
             weight2 = cell.linear2.weight + torch.randn_like(cell.linear2.weight) * 0.00001
@@ -350,6 +359,9 @@ def advance_round(game, countdown):
 
 
 def step(game):
+    # Iterate over a snapshot because combat can remove cells before their turn.
+    # The membership check preserves the original order for surviving cells while
+    # preventing removed cells from acting later in the same frame.
     for cell in list(game.cells):
         if cell not in game.cells:
             continue
@@ -399,14 +411,19 @@ def step(game):
 
 
 def init(game, num=2500):
+    total_in_game = len(game.cells)
     num = min(num, len(empty_positions(game)))
     for i in range(num):
         new_cell = random_spawn(game)
-        if len(game.cells) == 0:
+        # Preserve the original startup behavior: when the dish begins empty,
+        # every initial cell is independently random. Only later wave spawns
+        # mutate from the cells that existed before the wave started.
+        if total_in_game == 0:
             game.add_cell(*new_cell)
         else:
             cell = random.choice(game.cells)
             game.add_cell(*new_cell, genes=game.mutate(cell))
+            total_in_game -= 1
 
     return game
 
@@ -437,6 +454,8 @@ def main(args):
             try:
                 if len(game.cells) == 0:
                     game = init(game, num=MIN_WAVE)
+                # Snapshot flags are for bounded tests/reviews only. They run
+                # before step(), matching what a user sees rendered each frame.
                 if args.snapshot_dir and frame % args.snapshot_every == 0:
                     write_snapshot(game, countdown, frame, args.snapshot_dir)
                 if not args.no_render:
