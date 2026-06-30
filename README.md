@@ -42,6 +42,14 @@ Run the test cases:
 pytest test_cases
 ```
 
+Run a bounded snapshot review:
+
+```bash
+python test_cases/vibe_snapshot_review.py
+```
+
+This writes text snapshots under `test_cases/artifacts/` and asks `codex exec` to review them against `neural_petri_dish.py`. Use `--no-codex-review` to only collect snapshots, or `--reasoning xhigh` for a heavier Codex review pass.
+
 ## Notes
 
 - The simulation uses the current terminal size to define the grid.

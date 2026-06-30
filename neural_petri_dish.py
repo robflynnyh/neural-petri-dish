@@ -3,6 +3,7 @@ import torch
 import torch.nn as nn
 import argparse
 import os
+from pathlib import Path
 import pickle
 import random
 import shutil
@@ -36,6 +37,35 @@ def terminal_size(size=None):
         return size
     lines, columns = size
     return os.terminal_size((columns, lines))
+
+
+def parse_size(size):
+    if size is None:
+        return None
+    normalized = size.lower().replace(',', 'x')
+    try:
+        lines, columns = normalized.split('x', 1)
+        return int(lines), int(columns)
+    except ValueError as exc:
+        raise argparse.ArgumentTypeError('size must use LINESxCOLUMNS, for example 24x80') from exc
+
+
+def positive_int(value):
+    try:
+        parsed = int(value)
+    except ValueError as exc:
+        raise argparse.ArgumentTypeError('value must be an integer') from exc
+    if parsed <= 0:
+        raise argparse.ArgumentTypeError('value must be positive')
+    return parsed
+
+
+def seed_all(seed):
+    if seed is None:
+        return
+    random.seed(seed)
+    np.random.seed(seed)
+    torch.manual_seed(seed)
 
 
 def clone_parameter(tensor):
@@ -243,17 +273,80 @@ class Game():
                 'weight_2': weight2, 'bias_2': bias2}
 
 
-def print_grid(game):
+def render_grid(game, styled=True):
     # skip the 2 layer border
+    rows = []
     for row in range(2, game.size.lines):
-        pstring = [BLANK]*game.size.columns
+        pstring = [BLANK if styled else ' ']*game.size.columns
         cells_row = game.grid[row]
         #if sum(cells_row) != 0: # doesn't account for padding
         for col in range(2, game.size.columns + 2):
             if cells_row[col] == 1:
                 color = int((87 - 4*np.sum(game.grid[row-1:row+2,col-1:col+2])) % 255) # color is based on density of cells # could remove -1's to account for border padding
-                pstring[col - 2] = f'{fg(color)}{X}{fg.rs}' # -2 to account for skipped iteration from the two layer border
-        print(''.join(pstring))
+                pstring[col - 2] = f'{fg(color)}{X}{fg.rs}' if styled else '#'
+        rows.append(''.join(pstring))
+    return '\n'.join(rows)
+
+
+def print_grid(game):
+    print(render_grid(game))
+
+
+def status_line(game, countdown, styled=True):
+    totalcells = len(game.cells)
+    if totalcells == 0:
+        avghealth = 0
+        maxhealth = 0
+        maxage = 0
+    else:
+        avghealth = round(sum([c.health for c in game.cells]) / totalcells)
+        maxhealth = max([c.health for c in game.cells])
+        maxage = max([c.age for c in game.cells])
+
+    if not styled:
+        return (
+            f'Petri Dish      AVG HP: {avghealth}   MAX HP: {maxhealth}    '
+            f'Total Players: {totalcells}   Oldest Cell: {maxage}   '
+            f'Total Rounds: {game.rounds}    Countdown: {countdown}'
+        )
+
+    return (
+        f'{fg.red}Petri Dish{fg.rs}{fg.green}      AVG HP: {avghealth}   '
+        f'MAX HP: {maxhealth}{fg.rs}    {fg.white}Total Players: {totalcells}'
+        f'{fg.rs}   {fg.red}Oldest Cell: {maxage}   Total Rounds: {game.rounds}'
+        f'{fg.rs}    {fg.blue}Countdown: {countdown}{fg.rs}'
+    )
+
+
+def write_snapshot(game, countdown, frame, snapshot_dir):
+    snapshot_dir = Path(snapshot_dir)
+    snapshot_dir.mkdir(parents=True, exist_ok=True)
+    snapshot = [
+        f'Frame: {frame}',
+        status_line(game, countdown, styled=False),
+        render_grid(game, styled=False),
+        '',
+    ]
+    path = snapshot_dir / f'frame_{frame:05d}.txt'
+    path.write_text('\n'.join(snapshot), encoding='utf-8')
+    return path
+
+
+def advance_round(game, countdown):
+    if countdown == 0:
+        totalcells = len(game.cells)
+        maxage = max([c.age for c in game.cells]) if game.cells else 0
+        game = init(game, num=max(PER_WAVE - totalcells, MIN_WAVE))
+        countdown = ROUNDTIME
+        game.rounds += 1
+
+        if totalcells > MAX_TOTAL:
+            game = prune(game) # prune the game if it is too big
+        for cell in game.cells:
+            cell.age += 1
+            if cell.age == maxage:
+                cell.add_health()
+    return game, countdown
 
 
 def step(game):
@@ -331,45 +424,41 @@ def prune(game):
 
 
 def main(args):
+    seed_all(args.seed)
     with torch.no_grad():
         if args.load:
-            game = pickle.load(open(args.load, 'rb'))
+            game = load_state(args.load)
         else:
-            game = init(Game())
+            game = init(Game(size=args.size), num=args.initial_cells)
 
         countdown = ROUNDTIME
-        while True:
+        frame = 0
+        while args.max_frames is None or frame < args.max_frames:
             try:
                 if len(game.cells) == 0:
                     game = init(game, num=MIN_WAVE)
-                cls()
-                print_grid(game)
-                avghealth = round(sum([c.health for c in game.cells]) / len(game.cells))
-                maxhealth = max([c.health for c in game.cells])
-                maxage = max([c.age for c in game.cells])
-                totalcells = len(game.cells)
-                print(f'{fg.red}Petri Dish{fg.rs}{fg.green}      AVG HP: {avghealth}   MAX HP: {maxhealth}{fg.rs}    {fg.white}Total Players: {totalcells}{fg.rs}   {fg.red}Oldest Cell: {maxage}   Total Rounds: {game.rounds}{fg.rs}    {fg.blue}Countdown: {countdown}{fg.rs}')
-                if countdown == 0:
-                    game = init(game, num=max(PER_WAVE - totalcells, MIN_WAVE))
-                    countdown = ROUNDTIME
-                    game.rounds += 1
+                if args.snapshot_dir and frame % args.snapshot_every == 0:
+                    write_snapshot(game, countdown, frame, args.snapshot_dir)
+                if not args.no_render:
+                    cls()
+                    print_grid(game)
+                    print(status_line(game, countdown))
+                game, countdown = advance_round(game, countdown)
 
-                    if totalcells > MAX_TOTAL:
-                        game = prune(game) # prune the game if it is too big
-                    for cell in game.cells:
-                        cell.age += 1
-                        if cell.age == maxage:
-                            cell.add_health()
-
-                time.sleep(FRAME_RATE)
+                if args.frame_rate > 0:
+                    time.sleep(args.frame_rate)
                 game = step(game)
                 countdown -= 1
+                frame += 1
 
             except KeyboardInterrupt:
                 print('Saving...')
                 save_state(game, args.save)
                 print('Saved!')
                 break
+
+        if args.save_on_complete:
+            save_state(game, args.save)
 
 def save_state(game, name):
     with open(name, 'wb') as f:
@@ -386,6 +475,15 @@ if __name__ == '__main__':
     parser = argparse.ArgumentParser(description='Petri Dish')
     parser.add_argument('--load', help='load a saved state', default=False)
     parser.add_argument('--save', help='save the state', default='state.pkl')
+    parser.add_argument('--save-on-complete', action='store_true', help='save when a bounded run finishes')
+    parser.add_argument('--seed', type=int, help='seed Python, NumPy, and PyTorch RNGs')
+    parser.add_argument('--size', type=parse_size, help='grid size as LINESxCOLUMNS, for example 24x80')
+    parser.add_argument('--initial-cells', type=positive_int, default=2500, help='number of cells to spawn initially')
+    parser.add_argument('--max-frames', type=positive_int, help='stop after this many frames')
+    parser.add_argument('--snapshot-dir', help='write plain-text frame snapshots to this directory')
+    parser.add_argument('--snapshot-every', type=positive_int, default=1, help='write one snapshot every N frames')
+    parser.add_argument('--no-render', action='store_true', help='do not render frames to the terminal')
+    parser.add_argument('--frame-rate', type=float, default=FRAME_RATE, help='seconds to sleep between frames')
     args = parser.parse_args()
 
     main(args)
