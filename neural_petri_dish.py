@@ -214,8 +214,8 @@ class Cell:
         self.y = int(pos[0])
         self.x = int(pos[1])
         self.pos = [self.y, self.x]
-        self.health = 2
-        self.max_health = 15
+        self.health = 2.0
+        self.max_health = 15.0
         self.age = 0
         self.prev_state = np.zeros(HIDDEN_DIM, dtype=np.float32)
         self.diversity = None
@@ -901,6 +901,11 @@ def apply_cell_action(game, cell, action):
         index.pop(old_key, None)
         index[new_key] = cell
         grid[y, x] = 0
+        cell.health -= MOVEMENT_HEALTH_COST
+        if cell.health <= 0:
+            grid[new_y, new_x] = 0
+            index.pop(new_key, None)
+            game.cells_removed_this_step = True
         return
 
     if target_value == 0:
@@ -1026,6 +1031,7 @@ def init(game, num=2500):
 
 ROUNDTIME = 500
 ROUND_TRANSITION_HEALTH_COST = 1
+MOVEMENT_HEALTH_COST = 0.1
 PER_WAVE = 300
 MIN_WAVE = 250
 MAX_TOTAL = 1000
@@ -1366,7 +1372,7 @@ if __name__ == '__main__':
     parser.add_argument('--tensor-coeff-scale', type=float, default=FACTORED_WAVE_COEFF_SCALE)
     parser.add_argument('--tensor-stationary-health-cap', type=int, default=1)
     parser.add_argument('--tensor-static-refill-check-every', type=positive_int, default=100)
-    parser.add_argument('--tensor-health-dtype', choices=('int64', 'int32'), default='int32')
+    parser.add_argument('--tensor-health-dtype', choices=('float32', 'int64', 'int32'), default='float32')
     parser.add_argument('--tensor-compile-mode', choices=('default', 'reduce-overhead', 'max-autotune'), default='default')
     parser.add_argument('--tensor-matmul-precision', choices=('highest', 'high', 'medium'), default='high')
     parser.add_argument('--tensor-cuda-graph', dest='no_tensor_cuda_graph', action='store_false')

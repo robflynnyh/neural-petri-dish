@@ -56,7 +56,7 @@ def parse_args():
     parser.add_argument('--tensor-coeff-scale', type=float, default=npd.FACTORED_WAVE_COEFF_SCALE)
     parser.add_argument('--tensor-stationary-health-cap', type=int, default=1)
     parser.add_argument('--tensor-static-refill-check-every', type=positive_int, default=100)
-    parser.add_argument('--tensor-health-dtype', choices=tuple(HEALTH_DTYPES), default='int32')
+    parser.add_argument('--tensor-health-dtype', choices=tuple(HEALTH_DTYPES), default='float32')
     parser.add_argument('--tensor-compile-mode', choices=COMPILE_MODES, default='default')
     parser.add_argument('--tensor-matmul-precision', choices=MATMUL_PRECISIONS, default='high')
     parser.add_argument('--tensor-cuda-graph', dest='no_tensor_cuda_graph', action='store_false')

@@ -811,6 +811,58 @@ def test_snapshot_combat_attack_intent_into_empty_square_misses_cpu():
     assert_tensor_state_position_invariants(state)
 
 
+def test_snapshot_combat_successful_move_costs_fractional_health_cpu():
+    state = TensorRank1State.random(
+        cells=1,
+        height=8,
+        width=8,
+        families=1,
+        device=torch.device('cpu'),
+        initial_health=2,
+    )
+    state.positions = torch.tensor([[3, 3]], dtype=torch.long)
+    state.flat_positions = state.positions[:, 0] * state.grid_stride + state.positions[:, 1]
+    state.health = torch.tensor([2.0], dtype=state.health.dtype)
+    state.stationary_steps.zero_()
+    state.rebuild_grids()
+
+    state.apply_snapshot_combat(
+        torch.tensor([3], dtype=torch.long),
+        compact_dead=False,
+        sync_positions=True,
+    )
+
+    assert torch.allclose(state.health, torch.tensor([1.9], dtype=state.health.dtype))
+    assert int(state.flat_positions[0].item()) == 3 * state.grid_stride + 4
+    assert_tensor_state_position_invariants(state)
+
+
+def test_snapshot_combat_successful_move_can_kill_without_health_floor_cpu():
+    state = TensorRank1State.random(
+        cells=1,
+        height=8,
+        width=8,
+        families=1,
+        device=torch.device('cpu'),
+        initial_health=2,
+    )
+    state.positions = torch.tensor([[3, 3]], dtype=torch.long)
+    state.flat_positions = state.positions[:, 0] * state.grid_stride + state.positions[:, 1]
+    state.health = torch.tensor([0.05], dtype=state.health.dtype)
+    state.stationary_steps.zero_()
+    state.rebuild_grids()
+
+    state.apply_snapshot_combat(
+        torch.tensor([3], dtype=torch.long),
+        compact_dead=False,
+        sync_positions=True,
+    )
+
+    assert state.health.tolist() == [0.0]
+    assert int(state.index_grid.reshape(-1)[3 * state.grid_stride + 4].item()) == -1
+    assert_tensor_state_position_invariants(state)
+
+
 def test_snapshot_combat_collision_losers_do_not_stay_alive_cpu():
     state = TensorRank1State.random(
         cells=3,

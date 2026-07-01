@@ -170,6 +170,33 @@ def test_move_intent_into_occupied_square_misses_turn():
     assert blocker.pos == [4, 5]
 
 
+def test_successful_move_costs_fractional_health():
+    game = npd.Game(size=(8, 8))
+    game.add_cell(4, 4)
+    mover = game.get_cell(4, 4)
+    mover.health = 2.0
+    force_action(mover, 3, attack=False)
+
+    npd.step(game)
+
+    assert len(game.cells) == 1
+    assert mover.pos == [4, 5]
+    assert mover.health == pytest.approx(1.9)
+
+
+def test_successful_move_can_kill_without_health_floor():
+    game = npd.Game(size=(8, 8))
+    game.add_cell(4, 4)
+    mover = game.get_cell(4, 4)
+    mover.health = 0.05
+    force_action(mover, 3, attack=False)
+
+    npd.step(game)
+
+    assert mover not in game.cells
+    assert game.grid[4, 5] == 0
+
+
 def test_attack_intent_into_empty_square_misses_turn():
     game = npd.Game(size=(8, 8))
     game.add_cell(4, 4)

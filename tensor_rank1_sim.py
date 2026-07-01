@@ -23,6 +23,7 @@ _COMPILED_REBUILD_SNAPSHOT_COMBAT_STEP = {}
 _COMPILED_FAMILY_BASIS_REBUILD_SNAPSHOT_COMBAT_STEP = {}
 _COMPILED_FAMILY_BASIS_REBUILD_SNAPSHOT_COMBAT_BLOCK = {}
 HEALTH_DTYPES = {
+    'float32': torch.float32,
     'int64': torch.long,
     'int32': torch.int32,
 }
@@ -111,6 +112,13 @@ def stabilize_hidden(hidden):
 
 def stabilize_logits(logits):
     return logits.clamp_(-LOGIT_LIMIT, LOGIT_LIMIT)
+
+
+def apply_movement_health_cost(health, moved):
+    if npd.MOVEMENT_HEALTH_COST <= 0:
+        return health
+    cost = torch.as_tensor(npd.MOVEMENT_HEALTH_COST, device=health.device, dtype=torch.float32)
+    return health - moved.to(torch.float32) * cost
 
 
 def packed_actions_from_logits(logits):
@@ -210,6 +218,7 @@ def snapshot_combat_step_tensors(
     attacker_penalty = (hits_border | target_survives).to(health.dtype)
     attacker_reward = target_killed.to(health.dtype) * KILL_REWARD
     new_health = (health - damage_received - attacker_penalty + attacker_reward).clamp_max(MAX_HEALTH)
+    new_health = apply_movement_health_cost(new_health, hits_empty)
     new_flat_positions = torch.where(hits_empty | target_killed, target_flat_positions, flat_positions)
 
     alive = new_health > 0
@@ -302,6 +311,7 @@ def snapshot_combat_step_tensors_rebuild_grid(
     attacker_penalty = (hits_border | target_survives).to(health.dtype)
     attacker_reward = target_killed.to(health.dtype) * KILL_REWARD
     new_health = (health - damage_received - attacker_penalty + attacker_reward).clamp_max(MAX_HEALTH)
+    new_health = apply_movement_health_cost(new_health, hits_empty)
     new_flat_positions = torch.where(hits_empty | target_killed, target_flat_positions, flat_positions)
 
     alive = new_health > 0
@@ -406,6 +416,7 @@ def snapshot_combat_step_tensors_family_basis_rebuild_grid(
     attacker_penalty = (hits_border | target_survives).to(health.dtype)
     attacker_reward = target_killed.to(health.dtype) * KILL_REWARD
     new_health = (health - damage_received - attacker_penalty + attacker_reward).clamp_max(MAX_HEALTH)
+    new_health = apply_movement_health_cost(new_health, hits_empty)
     new_flat_positions = torch.where(hits_empty | target_killed, target_flat_positions, flat_positions)
     stayed_put = active & (new_flat_positions == flat_positions)
     new_stationary_steps = torch.where(stayed_put, stationary_steps + 1, torch.zeros_like(stationary_steps))
@@ -614,7 +625,7 @@ class TensorRank1State:
             families,
             device,
             initial_health=2,
-            health_dtype=torch.long,
+            health_dtype=torch.float32,
             coeff_scale=npd.FACTORED_WAVE_COEFF_SCALE,
             stationary_health_cap=1):
         device = torch.device(device)
@@ -704,7 +715,7 @@ class TensorRank1State:
             device,
             initial_health=2,
             cell_capacity=None,
-            health_dtype=torch.long,
+            health_dtype=torch.float32,
             coeff_scale=npd.FACTORED_WAVE_COEFF_SCALE,
             stationary_health_cap=1):
         board_capacity = (height - 2) * width
@@ -895,7 +906,11 @@ class TensorRank1State:
 
     def damage_buffer(self):
         cached = getattr(self, '_damage_buffer', None)
-        if cached is None or cached.shape[0] != self.cells or cached.device != self.device:
+        if (
+                cached is None
+                or cached.shape[0] != self.cells
+                or cached.device != self.device
+                or cached.dtype != self.health.dtype):
             cached = torch.empty(self.cells, device=self.device, dtype=self.health.dtype)
             self._damage_buffer = cached
         return cached
@@ -1072,14 +1087,15 @@ class TensorRank1State:
         target_indices = self.index_grid.reshape(-1)[target_flat_positions]
         can_move = (directions != 0) & (target_indices == -1) & ~action_attack_intents(actions)
         self.flat_positions = torch.where(can_move, target_flat_positions, self.flat_positions)
+        health_after_move = apply_movement_health_cost(self.health, can_move)
         if sync_positions:
             self.sync_positions_from_flat()
         self.update_grids_incremental(old_flat_positions)
         owns_position = self.index_grid.reshape(-1)[self.flat_positions] == self.index_grid_indices()
         self.health = torch.where(
-            (self.health > 0) & owns_position,
-            self.health,
-            torch.zeros_like(self.health),
+            (health_after_move > 0) & owns_position,
+            health_after_move,
+            torch.zeros_like(health_after_move),
         )
 
     def update_grids_incremental(self, old_flat_positions, alive=None):
@@ -1155,6 +1171,7 @@ class TensorRank1State:
         attacker_penalty = (hits_border | target_survives).to(self.health.dtype)
         attacker_reward = target_killed.to(self.health.dtype) * KILL_REWARD
         new_health = (self.health - damage_received - attacker_penalty + attacker_reward).clamp_max(MAX_HEALTH)
+        new_health = apply_movement_health_cost(new_health, hits_empty)
 
         self.flat_positions = torch.where(hits_empty | target_killed, target_flat_positions, self.flat_positions)
         stayed_put = active & (self.flat_positions == old_flat_positions)
@@ -1520,7 +1537,7 @@ def benchmark_tensor_state(
         cell_capacity=None,
         static_refill_empty=False,
         static_refill_check_every=1,
-        health_dtype='int64',
+        health_dtype='float32',
         coeff_scale=npd.FACTORED_WAVE_COEFF_SCALE,
         stationary_health_cap=1,
         static_rebuild_grid=False,

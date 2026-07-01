@@ -12,6 +12,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 import neural_petri_dish as npd
 from tensor_rank1_sim import (
+    HEALTH_DTYPES,
     KILL_REWARD,
     MAX_HEALTH,
     TensorRank1State,
@@ -63,7 +64,7 @@ def parse_args():
     parser.add_argument('--initial-health', type=positive_int, default=15)
     parser.add_argument('--wave-initial-health', type=positive_int, default=2)
     parser.add_argument('--stationary-health-cap', type=int, default=1)
-    parser.add_argument('--health-dtype', choices=('int64', 'int32'), default='int32')
+    parser.add_argument('--health-dtype', choices=tuple(HEALTH_DTYPES), default='float32')
     parser.add_argument('--output-json')
     parser.add_argument('--output-csv')
     return parser.parse_args()
@@ -117,6 +118,7 @@ def action_counts(state, actions):
         - (hits_border | target_survives).to(health.dtype)
         + target_killed.to(health.dtype) * KILL_REWARD
     ).clamp_max(MAX_HEALTH)
+    predicted_health = predicted_health - hits_empty.to(torch.float32) * npd.MOVEMENT_HEALTH_COST
 
     rows = state.flat_positions.div(state.grid_stride, rounding_mode='floor')
     cols = state.flat_positions.remainder(state.grid_stride)
