@@ -1119,10 +1119,21 @@ def main_tensor_rank1(args):
         return spawned
 
     def run_steps(step_count):
+        nonlocal graph_runner
         if step_count <= 0:
             return
         if device.type == 'cuda':
-            if graph_runner is not None and step_count == block_steps:
+            if not args.no_tensor_cuda_graph and step_count == block_steps:
+                if graph_runner is None:
+                    compile_state = state.clone()
+                    compile_state.compiled_snapshot_combat_steps(
+                        block_steps,
+                        rebuild_grid=True,
+                        family_basis=True,
+                        compile_mode=args.tensor_compile_mode,
+                    )
+                    synchronize(device)
+                    graph_runner = CudaGraphFamilyBasisBlockRunner(state, block_steps, args.tensor_compile_mode)
                 graph_runner.replay()
             else:
                 state.compiled_snapshot_combat_steps(

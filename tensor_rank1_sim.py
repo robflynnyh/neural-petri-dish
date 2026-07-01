@@ -1389,6 +1389,8 @@ def benchmark_tensor_state(
     segment_start_families = 0
     completed_steps = 0
     graph_block_runners = {}
+    timed_cuda_graph_captures = 0
+    cuda_graph_replay_enabled = False
     last_active_cells = None
 
     def refresh_active_cell_count():
@@ -1450,13 +1452,27 @@ def benchmark_tensor_state(
         })
 
     def run_compiled_steps(step_count):
-        if cuda_graph_block:
+        nonlocal timed_cuda_graph_captures
+        if cuda_graph_block and cuda_graph_replay_enabled:
             runner = graph_block_runners.get(step_count)
-            if runner is not None:
-                runner.replay()
-                return None
-            if graph_block_runners:
-                raise ValueError(f'cuda graph block runner for {step_count} steps was not captured')
+            if runner is None:
+                compile_state = state.clone()
+                compile_state.compiled_snapshot_combat_steps(
+                    step_count,
+                    rebuild_grid=static_rebuild_grid,
+                    family_basis=family_basis_step,
+                    compile_mode=compile_mode,
+                )
+                synchronize(state.device)
+                runner = CudaGraphFamilyBasisBlockRunner(
+                    state,
+                    step_count,
+                    compile_mode,
+                )
+                graph_block_runners[step_count] = runner
+                timed_cuda_graph_captures += 1
+            runner.replay()
+            return None
         if step_count == 1:
             return state.compiled_snapshot_combat_step(
                 rebuild_grid=static_rebuild_grid,
@@ -1491,6 +1507,7 @@ def benchmark_tensor_state(
 
     grad_context = torch.no_grad() if compiled_step else torch.inference_mode()
     with grad_context:
+        cuda_graph_replay_enabled = False
         if compiled_step and compiled_block_steps > 1:
             benchmark_state = state
             state = benchmark_state.clone()
@@ -1506,6 +1523,7 @@ def benchmark_tensor_state(
                         compile_mode,
                     )
                 synchronize(state.device)
+            cuda_graph_replay_enabled = True
         warmup_step = 0
         while warmup_step < max(warmup_steps, 0):
             warmup_count = min(compiled_block_steps, max(warmup_steps, 0) - warmup_step)
@@ -1647,6 +1665,7 @@ def benchmark_tensor_state(
         'compiled_block_steps': compiled_block_steps if compiled_step else None,
         'compile_mode': compile_mode if compiled_step else None,
         'cuda_graph_block': cuda_graph_block,
+        'timed_cuda_graph_captures': timed_cuda_graph_captures if cuda_graph_block else None,
         'cuda_name': torch.cuda.get_device_name(state.device) if state.device.type == 'cuda' else '',
         'device': str(state.device),
         'elapsed_seconds': elapsed,
