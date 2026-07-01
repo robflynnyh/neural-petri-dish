@@ -182,6 +182,8 @@ def snapshot_combat_step_tensors(
         reduce='amax',
         include_self=True,
     )
+    owns_position = index_flat[new_flat_positions] == indices
+    new_health = torch.where(alive & owns_position, new_health, torch.zeros_like(new_health))
     grid_flat[new_flat_positions] = (index_flat[new_flat_positions] >= 0).to(grid.dtype)
     return new_flat_positions, new_health, hidden, actions
 
@@ -259,6 +261,8 @@ def snapshot_combat_step_tensors_rebuild_grid(
         reduce='amax',
         include_self=True,
     )
+    owns_position = index_flat[new_flat_positions] == indices
+    new_health = torch.where(alive & owns_position, new_health, torch.zeros_like(new_health))
     grid_flat[new_flat_positions] = (index_flat[new_flat_positions] >= 0).to(grid.dtype)
     return new_flat_positions, new_health, hidden, actions
 
@@ -350,6 +354,13 @@ def snapshot_combat_step_tensors_family_basis_rebuild_grid(
         write_indices,
         reduce='amax',
         include_self=True,
+    )
+    owns_position = index_flat[new_flat_positions] == scatter_indices
+    new_health = torch.where(alive & owns_position, new_health, torch.zeros_like(new_health))
+    new_stationary_steps = torch.where(
+        new_health > 0,
+        new_stationary_steps,
+        torch.zeros_like(new_stationary_steps),
     )
     return new_flat_positions, new_health, new_stationary_steps, hidden, actions
 
@@ -973,6 +984,12 @@ class TensorRank1State:
         if sync_positions:
             self.sync_positions_from_flat()
         self.update_grids_incremental(old_flat_positions)
+        owns_position = self.index_grid.reshape(-1)[self.flat_positions] == self.index_grid_indices()
+        self.health = torch.where(
+            (self.health > 0) & owns_position,
+            self.health,
+            torch.zeros_like(self.health),
+        )
 
     def update_grids_incremental(self, old_flat_positions, alive=None):
         grid_flat = self.grid.reshape(-1)
@@ -1053,10 +1070,23 @@ class TensorRank1State:
         if sync_positions:
             self.sync_positions_from_flat()
         alive = self.health > 0
+        self.update_grids_incremental(old_flat_positions, alive=alive)
+        owns_position = self.index_grid.reshape(-1)[self.flat_positions] == self.index_grid_indices()
+        self.health = torch.where(
+            alive & owns_position,
+            self.health,
+            torch.zeros_like(self.health),
+        )
+        self.stationary_steps = torch.where(
+            self.health > 0,
+            self.stationary_steps,
+            torch.zeros_like(self.stationary_steps),
+        )
+        alive = self.health > 0
         if not compact_dead:
-            self.update_grids_incremental(old_flat_positions, alive=alive)
+            return
         elif bool(alive.all()):
-            self.update_grids_incremental(old_flat_positions)
+            return
         else:
             if not sync_positions:
                 self.sync_positions_from_flat()

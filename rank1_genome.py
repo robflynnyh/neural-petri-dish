@@ -2,7 +2,9 @@ import numpy as np
 import torch
 
 
-FACTORED_WAVE_COEFF_SCALE = 0.001
+# Rank-1 directions are normalized to unit RMS, so this is the approximate
+# per-wave perturbation RMS added to the shared base weights.
+FACTORED_WAVE_COEFF_SCALE = 0.3
 
 
 def clone_tensor(tensor):

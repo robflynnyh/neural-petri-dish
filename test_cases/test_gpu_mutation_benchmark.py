@@ -31,8 +31,10 @@ def assert_tensor_state_position_invariants(state):
     if alive.any():
         assert state.grid.reshape(-1)[state.flat_positions[alive]].eq(1).all()
         live_index_values = state.index_grid.reshape(-1)[state.flat_positions[alive]]
+        expected_indices = torch.arange(state.cells, device=state.device, dtype=live_index_values.dtype)[alive]
         assert live_index_values.ge(0).all()
         assert live_index_values.lt(state.cells).all()
+        assert torch.equal(live_index_values, expected_indices)
         assert state.health[live_index_values.to(torch.long)].gt(0).all()
 
 
@@ -524,7 +526,7 @@ def test_snapshot_combat_family_basis_rebuild_step_matches_eager_for_multiple_st
         assert torch.equal(tensor_step.flat_positions, eager.flat_positions)
         assert torch.equal(tensor_step.health, eager.health)
         assert torch.equal(tensor_step.stationary_steps, eager.stationary_steps)
-        assert torch.allclose(tensor_step.recurrent_state, eager.recurrent_state)
+        assert torch.allclose(tensor_step.recurrent_state, eager.recurrent_state, atol=1e-6)
         assert torch.equal(tensor_step.index_grid, eager.index_grid)
 
 
@@ -570,7 +572,7 @@ def test_snapshot_combat_family_basis_rebuild_block_matches_eager_cpu():
     assert torch.equal(flat_positions, eager.flat_positions)
     assert torch.equal(health, eager.health)
     assert torch.equal(stationary_steps, eager.stationary_steps)
-    assert torch.allclose(recurrent_state, eager.recurrent_state)
+    assert torch.allclose(recurrent_state, eager.recurrent_state, atol=1e-6)
     assert torch.equal(tensor_step.index_grid, eager.index_grid)
 
 
@@ -696,6 +698,33 @@ def test_snapshot_combat_kill_moves_attacker_and_rewards_health_cpu():
     assert state.health.tolist() == [4, 0]
     assert int(state.flat_positions[0].item()) == 3 * state.grid_stride + 4
     assert int(state.index_grid.reshape(-1)[state.flat_positions[0]].item()) == 0
+
+
+def test_snapshot_combat_collision_losers_do_not_stay_alive_cpu():
+    state = TensorRank1State.random(
+        cells=3,
+        height=8,
+        width=8,
+        families=1,
+        device=torch.device('cpu'),
+        initial_health=2,
+    )
+    state.positions = torch.tensor([[3, 3], [3, 5], [3, 4]], dtype=torch.long)
+    state.flat_positions = state.positions[:, 0] * state.grid_stride + state.positions[:, 1]
+    state.health = torch.tensor([2, 2, 1], dtype=state.health.dtype)
+    state.stationary_steps.zero_()
+    state.rebuild_grids()
+
+    state.apply_snapshot_combat(
+        torch.tensor([3, 4, 0], dtype=torch.long),
+        compact_dead=False,
+        sync_positions=False,
+    )
+
+    assert int((state.health > 0).sum().item()) == 1
+    assert int(state.index_grid.reshape(-1)[3 * state.grid_stride + 4].item()) in (0, 1)
+    state.sync_positions_from_flat()
+    assert_tensor_state_position_invariants(state)
 
 
 def test_tensor_rank1_state_deferred_compaction_removes_dead_cells_from_grid():

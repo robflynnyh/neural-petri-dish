@@ -703,3 +703,37 @@ def test_mutation_comparison_writes_csv_plot_and_videos(tmp_path):
     csv_text = (tmp_path / 'survival_rounds_2.csv').read_text(encoding='utf-8')
     assert 'mutation_mode,round,previous_round_cells,pre_refill_cells,post_refill_cells' in csv_text
     assert 'shared_rank1_factored,0,' in csv_text
+
+
+def test_tensor_rank1_edge_diagnostics_cpu_smoke(tmp_path):
+    script = Path(__file__).resolve().parents[1] / 'scripts' / 'tensor_rank1_edge_diagnostics.py'
+    output_json = tmp_path / 'edge_diagnostics.json'
+    result = subprocess.run(
+        [
+            sys.executable,
+            str(script),
+            '--device',
+            'cpu',
+            '--size',
+            '8x8',
+            '--initial-cells',
+            '8',
+            '--rounds',
+            '1',
+            '--coeff-scales',
+            '0.001,0.01',
+            '--family-capacity',
+            '3',
+            '--output-json',
+            str(output_json),
+        ],
+        cwd=Path(__file__).resolve().parents[1],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    rows = json.loads(output_json.read_text(encoding='utf-8'))
+    assert [row['coeff_scale'] for row in rows] == [0.001, 0.01]
+    assert all(row['steps'] == npd.ROUNDTIME for row in rows)
+    assert all('border_hit_rate_per_move' in row for row in rows)
+    assert result.stdout.count('"coeff_scale"') == 2
