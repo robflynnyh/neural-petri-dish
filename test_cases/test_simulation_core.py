@@ -317,23 +317,20 @@ def test_light_rank1_mutation_keeps_family_and_moves_coefficients(monkeypatch):
 
 def test_shared_rank1_spawn_uses_one_base_per_wave():
     npd.seed_all(7)
-    game = npd.Game(size=(6, 6), mutation_mode=npd.MUTATION_MODE_SHARED_RANK1)
+    game = npd.Game(size=(6, 6), mutation_mode=npd.MUTATION_MODE_SHARED_RANK1_FACTORED)
 
     npd.init(game, num=4)
 
     assert len(game.cells) == 4
-    assert {cell.genome_mode for cell in game.cells} == {npd.MUTATION_MODE_SHARED_RANK1}
-    assert {cell.base_id for cell in game.cells} == {0}
+    assert len({cell.rank1_family for cell in game.cells}) == 1
     for cell in game.cells:
-        assert torch.allclose(cell.shared_base['weight_1'], game.shared_base_genes['weight_1'])
-        assert torch.allclose(cell.linear.weight, cell.shared_base['weight_1'] + npd.rank1_delta(
-            cell.rank1['weight_1_u'],
-            cell.rank1['weight_1_v'],
-        ))
+        family = cell.rank1_family
+        assert torch.allclose(cell.linear.weight, family.materialize_weight_1(cell.rank1_coeff_1))
+        assert torch.allclose(cell.linear2.weight, family.materialize_weight_2(cell.rank1_coeff_2))
 
 
 def test_shared_rank1_base_updates_from_hp_weighted_survivors():
-    game = npd.Game(size=(6, 6), mutation_mode=npd.MUTATION_MODE_SHARED_RANK1)
+    game = npd.Game(size=(6, 6), mutation_mode=npd.MUTATION_MODE_SHARED_RANK1_FACTORED)
     game.add_cell(2, 2)
     game.add_cell(2, 3)
     first, second = game.cells
@@ -343,38 +340,46 @@ def test_shared_rank1_base_updates_from_hp_weighted_survivors():
     with torch.no_grad():
         first.linear.weight.fill_(2)
         second.linear.weight.fill_(10)
+        first.linear2.weight.fill_(4)
+        second.linear2.weight.fill_(12)
 
-    game.update_shared_base_from_survivors()
+    family = game.make_factored_wave_family()
 
-    assert torch.allclose(game.shared_base_genes['weight_1'], torch.full_like(first.linear.weight, 8.0))
-    assert game.shared_base_id == 1
+    assert torch.allclose(family.base_weight_1, torch.full_like(first.linear.weight, 8.0))
+    assert torch.allclose(family.base_weight_2, torch.full_like(first.linear2.weight, 10.0))
 
 
 def test_batched_shared_rank1_actions_match_materialized_networks():
     npd.seed_all(11)
-    game = npd.Game(size=(6, 6), mutation_mode=npd.MUTATION_MODE_SHARED_RANK1)
+    game = npd.Game(
+        size=(6, 6),
+        mutation_mode=npd.MUTATION_MODE_SHARED_RANK1_FACTORED,
+        action_backend=npd.ACTION_BACKEND_FAMILY_BATCHED,
+        action_device='cpu',
+        batched_min_family_size=1,
+    )
     npd.init(game, num=3)
     cells = game.cells
-    neighbors = [torch.randn(24) for _cell in cells]
     expected = []
 
-    for cell, neighbor in zip(cells, neighbors):
-        inputs = torch.cat((neighbor, torch.zeros(9))).unsqueeze(0)
-        logits = cell.linear2(torch.relu(cell.linear(inputs)))
-        expected.append(logits.argmax().item())
+    for cell in cells:
+        y, x = cell.pos
+        neighbors = game.grid[y-2:y+3, x-2:x+3].reshape(25)
+        expected.append(cell.forward_flat_neighbors25(neighbors))
 
-    assert npd.batched_shared_rank1_actions(cells, neighbors) == expected
+    planned = npd.planned_family_action_list(game, cells)
+    assert [action for action, _hidden in planned] == expected
 
 
-def test_simultaneous_attack_can_catch_moving_target(monkeypatch):
-    game = npd.Game(size=(8, 8), action_mode=npd.ACTION_MODE_SIMULTANEOUS)
+def test_lethal_attack_moves_attacker_and_refills_origin(monkeypatch):
+    game = npd.Game(size=(8, 8))
     game.add_cell(4, 4)
     game.add_cell(4, 5)
     attacker = game.get_cell(4, 4)
     victim = game.get_cell(4, 5)
     force_action(attacker, 3)
     force_action(victim, 3)
-    victim.health = 5
+    victim.health = 1
     monkeypatch.setattr(npd.random, 'choice', lambda items: items[0])
     monkeypatch.setattr(npd.random, 'random', lambda: 0.0)
 
@@ -629,8 +634,8 @@ def test_mutation_comparison_writes_csv_plot_and_videos(tmp_path):
             '7',
             '--cell-size',
             '4',
-            '--action-mode',
-            'simultaneous',
+            '--action-backend',
+            'sequential',
         ],
         capture_output=True,
         text=True,
@@ -647,7 +652,7 @@ def test_mutation_comparison_writes_csv_plot_and_videos(tmp_path):
         assert video.stat().st_size > 0
         manifest_text = manifest.read_text(encoding='utf-8')
         assert f'mutation_mode: {mode}' in manifest_text
-        assert 'action_mode: simultaneous' in manifest_text
+        assert 'action_backend: sequential' in manifest_text
 
     csv_text = (tmp_path / 'survival_rounds_2.csv').read_text(encoding='utf-8')
     assert 'mutation_mode,round,previous_round_cells,pre_refill_cells,post_refill_cells' in csv_text

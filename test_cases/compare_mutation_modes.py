@@ -33,6 +33,7 @@ def parse_args():
     parser.add_argument('--cell-size', type=positive_int, default=8)
     parser.add_argument('--status-height', type=positive_int, default=34)
     parser.add_argument('--roundtime', type=positive_int, default=npd.ROUNDTIME)
+    parser.add_argument('--action-backend', choices=npd.ACTION_BACKENDS, default=npd.ACTION_BACKEND_SEQUENTIAL)
     parser.add_argument('--modes', nargs='+', choices=npd.MUTATION_MODES, default=list(npd.MUTATION_MODES))
     return parser.parse_args()
 
@@ -114,6 +115,7 @@ def write_video_manifest(path, args, mode, frames_written, rounds_rendered):
         f'initial_cells: {args.initial_cells}',
         f'seed: {args.seed}',
         f'roundtime: {args.roundtime}',
+        f'action_backend: {args.action_backend}',
         f'frames_written: {frames_written}',
         f'rendered_rounds: {",".join(str(round_num) for round_num in rounds_rendered)}',
         '',
@@ -125,7 +127,10 @@ def run_mode(args, mode, output_dir):
     npd.seed_all(args.seed)
     npd.ROUNDTIME = args.roundtime
 
-    game = npd.init(npd.Game(size=args.size, mutation_mode=mode), num=args.initial_cells)
+    game = npd.init(
+        npd.Game(size=args.size, mutation_mode=mode, action_backend=args.action_backend),
+        num=args.initial_cells,
+    )
     countdown = npd.ROUNDTIME
     font = ImageFont.load_default()
     rounds_to_render = set(selected_rounds(args.rounds, args.render_every_rounds))
