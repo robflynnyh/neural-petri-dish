@@ -616,7 +616,7 @@ class TensorRank1State:
             initial_health=2,
             health_dtype=torch.long,
             coeff_scale=npd.FACTORED_WAVE_COEFF_SCALE,
-            stationary_health_cap=0):
+            stationary_health_cap=1):
         device = torch.device(device)
         playable_rows = height - 2
         playable_cols = width
@@ -706,7 +706,7 @@ class TensorRank1State:
             cell_capacity=None,
             health_dtype=torch.long,
             coeff_scale=npd.FACTORED_WAVE_COEFF_SCALE,
-            stationary_health_cap=0):
+            stationary_health_cap=1):
         board_capacity = (height - 2) * width
         capacity = board_capacity if cell_capacity is None else int(cell_capacity)
         if active_cells > capacity:
@@ -1522,7 +1522,7 @@ def benchmark_tensor_state(
         static_refill_check_every=1,
         health_dtype='int64',
         coeff_scale=npd.FACTORED_WAVE_COEFF_SCALE,
-        stationary_health_cap=0,
+        stationary_health_cap=1,
         static_rebuild_grid=False,
         family_basis_step=False,
         matmul_precision=None,

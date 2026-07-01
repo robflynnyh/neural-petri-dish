@@ -39,7 +39,7 @@ def parse_args():
     parser.add_argument('--tensor-initial-health', type=positive_int, default=15)
     parser.add_argument('--tensor-wave-initial-health', type=positive_int, default=2)
     parser.add_argument('--tensor-coeff-scale', type=float, default=npd.FACTORED_WAVE_COEFF_SCALE)
-    parser.add_argument('--tensor-stationary-health-cap', type=int, default=0)
+    parser.add_argument('--tensor-stationary-health-cap', type=int, default=1)
     parser.add_argument('--tensor-family-capacity', type=positive_int, default=10)
     parser.add_argument('--tensor-cell-capacity', type=positive_int)
     parser.add_argument('--tensor-static-refill-check-every', type=positive_int, default=100)
