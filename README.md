@@ -59,6 +59,14 @@ python test_cases/render_video.py --output test_cases/artifacts/neural_petri_dis
 The video renderer runs the simulation headlessly and writes an MP4/GIF-style artifact without terminal rendering. Use `--frames`, `--render-rounds`, `--round-stride`, `--fps`, `--size`, `--initial-cells`, and `--seed` to make automated PR previews repeatable.
 Use `--render-rounds 5 --round-stride 4` to render every frame inside five full UI rounds sampled as rounds `0,4,8,12,16`; the skipped rounds still run headlessly.
 
+Render the GPU-resident tensor rank-1 engine over a long run while only writing selected rounds:
+
+```bash
+python test_cases/render_tensor_rank1_video.py --rounds 10000 --render-rounds 10 --round-stride 1000 --action-device cuda
+```
+
+This writes `test_cases/artifacts/tensor_rank1_10k_rounds_every_1000.mp4` plus a manifest and metrics JSON. The simulation still advances through all 10,000 rounds; the video encodes every frame only for rounds `0,1000,...,9000`.
+
 Record shared rank-1 mutation dynamics:
 
 ```bash

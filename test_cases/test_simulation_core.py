@@ -576,6 +576,52 @@ def test_video_renderer_writes_artifact_and_manifest(tmp_path):
     assert 'rendered_rounds: 0,2' in manifest_text
 
 
+def test_tensor_rank1_video_renderer_writes_artifact_and_manifest(tmp_path):
+    script = Path(__file__).resolve().parent / 'render_tensor_rank1_video.py'
+    output = tmp_path / 'tensor_preview.mp4'
+    result = subprocess.run(
+        [
+            sys.executable,
+            str(script),
+            '--output',
+            str(output),
+            '--rounds',
+            '1',
+            '--render-rounds',
+            '1',
+            '--round-stride',
+            '1',
+            '--fps',
+            '10',
+            '--size',
+            '5x5',
+            '--initial-cells',
+            '4',
+            '--seed',
+            '7',
+            '--action-device',
+            'cpu',
+            '--cell-size',
+            '4',
+        ],
+        capture_output=True,
+        text=True,
+        timeout=30,
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert output.exists()
+    assert output.stat().st_size > 0
+    manifest = output.with_suffix(output.suffix + '.manifest.txt')
+    assert manifest.exists()
+    manifest_text = manifest.read_text(encoding='utf-8')
+    assert 'rounds_requested: 1' in manifest_text
+    assert 'render_rounds: 1' in manifest_text
+    assert 'round_stride: 1' in manifest_text
+    assert 'frames_written: 500' in manifest_text
+    assert 'rendered_rounds: 0' in manifest_text
+
+
 def test_normal_play_benchmark_exposes_tensor_engine_and_rejects_cpu():
     script = Path(__file__).resolve().parents[1] / 'scripts' / 'benchmark_normal_play.py'
     help_result = subprocess.run(
