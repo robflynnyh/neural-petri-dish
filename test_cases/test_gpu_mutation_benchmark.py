@@ -463,6 +463,7 @@ def test_snapshot_combat_family_basis_rebuild_step_matches_eager_cpu():
         tensor_step.u_2,
         tensor_step.v_2,
         tensor_step.index_grid_indices(),
+        tensor_step.dead_index_grid_indices(),
         tensor_step.neighbor_flat_offsets,
         tensor_step.direction_flat_deltas,
     )
@@ -505,6 +506,7 @@ def test_snapshot_combat_family_basis_rebuild_step_matches_eager_for_multiple_st
             tensor_step.u_2,
             tensor_step.v_2,
             tensor_step.index_grid_indices(),
+            tensor_step.dead_index_grid_indices(),
             tensor_step.neighbor_flat_offsets,
             tensor_step.direction_flat_deltas,
         )
@@ -551,6 +553,7 @@ def test_snapshot_combat_family_basis_rebuild_block_matches_eager_cpu():
         tensor_step.u_2,
         tensor_step.v_2,
         tensor_step.index_grid_indices(),
+        tensor_step.dead_index_grid_indices(),
         tensor_step.neighbor_flat_offsets,
         tensor_step.direction_flat_deltas,
     )

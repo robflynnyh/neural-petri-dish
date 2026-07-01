@@ -250,6 +250,7 @@ def snapshot_combat_step_tensors_family_basis_rebuild_grid(
         u_2,
         v_2,
         scatter_indices,
+        dead_scatter_indices,
         neighbor_flat_offsets,
         direction_flat_deltas):
     inputs = torch.empty(flat_positions.shape[0], INPUT_DIM, device=index_grid.device)
@@ -302,7 +303,7 @@ def snapshot_combat_step_tensors_family_basis_rebuild_grid(
 
     alive = new_health > 0
     index_grid[2:-2, 2:-2].fill_(-1)
-    write_indices = torch.where(alive, scatter_indices, torch.full_like(scatter_indices, -1))
+    write_indices = torch.where(alive, scatter_indices, dead_scatter_indices)
     index_flat.scatter_reduce_(
         0,
         new_flat_positions,
@@ -369,6 +370,7 @@ def family_basis_rebuild_snapshot_combat_block_tensors(block_steps):
             u_2,
             v_2,
             scatter_indices,
+            dead_scatter_indices,
             neighbor_flat_offsets,
             direction_flat_deltas):
         for _ in range(block_steps):
@@ -389,6 +391,7 @@ def family_basis_rebuild_snapshot_combat_block_tensors(block_steps):
                 u_2,
                 v_2,
                 scatter_indices,
+                dead_scatter_indices,
                 neighbor_flat_offsets,
                 direction_flat_deltas,
             )
@@ -445,6 +448,7 @@ class CudaGraphFamilyBasisBlockRunner:
                 state.u_2,
                 state.v_2,
                 state.index_grid_indices(),
+                state.dead_index_grid_indices(),
                 state.neighbor_flat_offsets,
                 state.direction_flat_deltas,
             )
@@ -707,6 +711,13 @@ class TensorRank1State:
         if cached is None or cached.shape[0] != self.cells or cached.device != self.device:
             cached = torch.arange(self.cells, device=self.device, dtype=self.index_grid.dtype)
             self._index_grid_indices = cached
+        return cached
+
+    def dead_index_grid_indices(self):
+        cached = getattr(self, '_dead_index_grid_indices', None)
+        if cached is None or cached.shape[0] != self.cells or cached.device != self.device:
+            cached = torch.full((self.cells,), -1, device=self.device, dtype=self.index_grid.dtype)
+            self._dead_index_grid_indices = cached
         return cached
 
     def input_buffer(self):
@@ -1180,6 +1191,7 @@ class TensorRank1State:
                 self.u_2,
                 self.v_2,
                 self.index_grid_indices(),
+                self.dead_index_grid_indices(),
                 self.neighbor_flat_offsets,
                 self.direction_flat_deltas,
             )
@@ -1238,6 +1250,7 @@ class TensorRank1State:
             self.u_2,
             self.v_2,
             self.index_grid_indices(),
+            self.dead_index_grid_indices(),
             self.neighbor_flat_offsets,
             self.direction_flat_deltas,
         )
