@@ -1,0 +1,32 @@
+Neural Petri Dish tensor rank-1 long-run video artifact
+
+output: test_cases/artifacts/tensor_rank1_10k_rounds_every_1000_survival_fitness_lr005_early_end_spawnx2.mp4
+elapsed_seconds: 429.374212
+rounds_requested: 10000
+rounds_completed: 10000
+render_rounds: 10
+round_stride: 1000
+rendered_rounds: 0,1000,2000,3000,4000,5000,6000,7000,8000,9000
+frames_written: 1925
+full_simulation_frames: 1939775
+fps: 24
+size: 60x80
+initial_cells: 2500
+seed: 7
+action_device: cuda
+cuda_name: NVIDIA RTX A4500
+tensor_block_steps: 10
+tensor_family_capacity: 10
+tensor_health_dtype: float32
+tensor_coeff_scale: 0.3
+tensor_stationary_health_cap: 1
+tensor_compile_mode: default
+tensor_matmul_precision: high
+fitness_update_lr: 0.05
+cuda_graph_captures: 0
+family_capacity_final: 10
+active_cells_final: 600
+waves_spawned: 5999999
+final_state: test_cases/artifacts/tensor_rank1_10k_rounds_every_1000_survival_fitness_lr005_early_end_spawnx2_final_state.pt
+empty_refills: 0
+early_ended_rounds: 9999
