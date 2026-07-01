@@ -489,6 +489,7 @@ def test_normal_play_benchmark_exposes_tensor_engine_and_rejects_cpu():
     assert help_result.returncode == 0, help_result.stderr
     assert '--engine {game,tensor_rank1}' in help_result.stdout
     assert '--tensor-family-capacity' in help_result.stdout
+    assert '--tensor-cell-capacity' in help_result.stdout
 
     cpu_result = subprocess.run(
         [

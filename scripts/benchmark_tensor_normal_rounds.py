@@ -46,6 +46,7 @@ def parse_args():
     parser.add_argument('--min-wave', type=positive_int, default=npd.MIN_WAVE)
     parser.add_argument('--wave-initial-health', type=positive_int, default=2)
     parser.add_argument('--family-capacity', type=positive_int, default=7)
+    parser.add_argument('--cell-capacity', type=positive_int)
     parser.add_argument('--static-refill-check-every', type=positive_int, default=100)
     parser.add_argument('--health-dtype', choices=tuple(HEALTH_DTYPES), default='int32')
     parser.add_argument('--matmul-precision', choices=MATMUL_PRECISIONS, default='high')
@@ -165,6 +166,7 @@ def run(args):
         compiled_step=True,
         static_capacity=True,
         family_capacity=args.family_capacity,
+        cell_capacity=args.cell_capacity,
         static_refill_empty=True,
         static_refill_check_every=args.static_refill_check_every,
         static_rebuild_grid=True,

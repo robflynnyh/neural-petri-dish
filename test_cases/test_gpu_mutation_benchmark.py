@@ -236,6 +236,7 @@ def test_tensor_normal_rounds_help_smoke():
     assert result.returncode == 0, result.stderr
     assert '--rounds' in result.stdout
     assert '--roundtime' in result.stdout
+    assert '--cell-capacity' in result.stdout
     assert '--no-cuda-graph-block' in result.stdout
 
 

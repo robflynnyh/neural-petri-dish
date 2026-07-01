@@ -39,6 +39,7 @@ def parse_args():
     parser.add_argument('--tensor-initial-health', type=positive_int, default=15)
     parser.add_argument('--tensor-wave-initial-health', type=positive_int, default=2)
     parser.add_argument('--tensor-family-capacity', type=positive_int, default=7)
+    parser.add_argument('--tensor-cell-capacity', type=positive_int)
     parser.add_argument('--tensor-static-refill-check-every', type=positive_int, default=100)
     parser.add_argument('--tensor-health-dtype', choices=tuple(HEALTH_DTYPES), default='int32')
     parser.add_argument('--tensor-matmul-precision', choices=MATMUL_PRECISIONS, default='high')
@@ -78,6 +79,7 @@ def run_tensor_rank1(args):
         compiled_step=True,
         static_capacity=True,
         family_capacity=args.tensor_family_capacity,
+        cell_capacity=args.tensor_cell_capacity,
         static_refill_empty=True,
         static_refill_check_every=args.tensor_static_refill_check_every,
         static_rebuild_grid=True,
