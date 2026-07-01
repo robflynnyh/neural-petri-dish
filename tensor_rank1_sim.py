@@ -1614,6 +1614,7 @@ def benchmark_tensor_state(
         compiled_block_steps=1,
         cuda_graph_block=False,
         normal_round_refill=False,
+        early_end_empty_round=False,
         per_wave=None,
         min_wave=None):
     compiled_step = bool(compiled_step)
@@ -1623,6 +1624,7 @@ def benchmark_tensor_state(
     family_basis_step = bool(family_basis_step)
     cuda_graph_block = bool(cuda_graph_block)
     normal_round_refill = bool(normal_round_refill)
+    early_end_empty_round = bool(early_end_empty_round)
     static_refill_check_every = max(int(static_refill_check_every), 1)
     compiled_block_steps = max(int(compiled_block_steps), 1)
     per_wave = npd.PER_WAVE if per_wave is None else int(per_wave)
@@ -1945,6 +1947,12 @@ def benchmark_tensor_state(
             if compact_every > 1 and _step % compact_every == 0:
                 state.compact(state.alive_mask())
                 compacted_this_step = True
+            if (
+                    early_end_empty_round
+                    and wave_every > 0
+                    and _step % wave_every != 0
+                    and active_cell_count_for_refill_check() == 0):
+                _step = min(steps, _step + (wave_every - (_step % wave_every)))
             if wave_every > 0 and _step % wave_every == 0:
                 state.apply_round_transition_health_cost(compact_dead=(not static_capacity and compact_every == 1))
                 invalidate_active_cell_count()
@@ -2025,6 +2033,7 @@ def benchmark_tensor_state(
         'device': str(state.device),
         'elapsed_seconds': elapsed,
         'empty_refills': empty_refills,
+        'early_end_empty_round': early_end_empty_round,
         'families': families,
         'families_final': state.families,
         'active_families_final': active_family_count if static_capacity else state.families,

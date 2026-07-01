@@ -746,8 +746,10 @@ def test_tensor_rank1_video_renderer_writes_artifact_and_manifest(tmp_path):
     assert 'rounds_requested: 1' in manifest_text
     assert 'render_rounds: 1' in manifest_text
     assert 'round_stride: 1' in manifest_text
-    assert 'frames_written: 500' in manifest_text
+    assert 'frames_written: 17' in manifest_text
     assert 'rendered_rounds: 0' in manifest_text
+    assert 'empty_refills: 0' in manifest_text
+    assert 'early_ended_rounds: 1' in manifest_text
 
 
 def test_normal_play_benchmark_exposes_tensor_engine_and_rejects_cpu():

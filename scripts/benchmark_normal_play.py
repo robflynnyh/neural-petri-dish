@@ -86,7 +86,7 @@ def run_tensor_rank1(args):
         static_capacity=True,
         family_capacity=args.tensor_family_capacity,
         cell_capacity=args.tensor_cell_capacity,
-        static_refill_empty=True,
+        static_refill_empty=False,
         static_refill_check_every=args.tensor_static_refill_check_every,
         static_rebuild_grid=True,
         family_basis_step=True,
@@ -95,6 +95,7 @@ def run_tensor_rank1(args):
         compiled_block_steps=args.tensor_compiled_block_steps,
         cuda_graph_block=not args.no_tensor_cuda_graph_block,
         normal_round_refill=True,
+        early_end_empty_round=True,
         per_wave=npd.PER_WAVE,
         min_wave=npd.MIN_WAVE,
     )

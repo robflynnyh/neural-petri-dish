@@ -134,6 +134,7 @@ class TensorRank1VideoRun:
         self.frame = 0
         self.waves_spawned = 0
         self.empty_refills = 0
+        self.early_ended_rounds = 0
         self.cuda_graph_captures = 0
         self.active_family_count = 1
         self.last_active_cells = None
@@ -196,14 +197,12 @@ class TensorRank1VideoRun:
         self.waves_spawned += spawned
         return spawned
 
-    def maybe_refill_empty(self):
-        if self.frame % self.args.tensor_static_refill_check_every != 0:
-            return True
-        if self.active_cell_count() != 0:
-            return True
-        spawned = self.spawn_wave(npd.MIN_WAVE)
-        self.empty_refills += 1
-        return spawned > 0
+    def round_should_end_early(self):
+        return self.active_cell_count() == 0
+
+    def end_round_early(self):
+        self.countdown = 0
+        self.early_ended_rounds += 1
 
     def graph_runner(self, step_count):
         runner = self.graph_runners.get(step_count)
@@ -249,13 +248,10 @@ class TensorRank1VideoRun:
 
     def advance_unrendered_round(self):
         while self.countdown > 0:
-            if not self.maybe_refill_empty():
-                return False
-            frames_to_refill_check = (
-                self.args.tensor_static_refill_check_every
-                - (self.frame % self.args.tensor_static_refill_check_every)
-            )
-            step_count = min(self.args.tensor_block_steps, self.countdown, frames_to_refill_check)
+            if self.round_should_end_early():
+                self.end_round_early()
+                break
+            step_count = min(self.args.tensor_block_steps, self.countdown)
             self.run_steps(step_count, use_cuda_graph=True)
             self.frame += step_count
             self.countdown -= step_count
@@ -273,8 +269,9 @@ class TensorRank1VideoRun:
     def render_round(self, writer, font):
         frames_written = 0
         while self.countdown > 0:
-            if not self.maybe_refill_empty():
-                return frames_written, False
+            if self.round_should_end_early():
+                self.end_round_early()
+                break
             index_grid, health, family_index = self.snapshot()
             writer.append_data(render_tensor_frame(
                 index_grid,
@@ -305,6 +302,7 @@ class TensorRank1VideoRun:
             'cuda_name': torch.cuda.get_device_name(self.device) if self.device.type == 'cuda' else '',
             'elapsed_seconds': elapsed_seconds,
             'empty_refills': self.empty_refills,
+            'early_ended_rounds': self.early_ended_rounds,
             'family_capacity_final': self.state.families,
             'frames_written': frames_written,
             'full_simulation_frames': self.frame,
@@ -333,6 +331,7 @@ class TensorRank1VideoRun:
                 'active_family_count': self.active_family_count,
                 'waves_spawned': self.waves_spawned,
                 'empty_refills': self.empty_refills,
+                'early_ended_rounds': self.early_ended_rounds,
             },
             'state': state,
         }
@@ -375,6 +374,7 @@ def write_manifest(path, args, metrics):
         f'waves_spawned: {metrics["waves_spawned"]}',
         f'final_state: {metrics.get("final_state", "")}',
         f'empty_refills: {metrics["empty_refills"]}',
+        f'early_ended_rounds: {metrics["early_ended_rounds"]}',
         '',
     ]
     path.with_suffix(path.suffix + '.manifest.txt').write_text('\n'.join(manifest), encoding='utf-8')
