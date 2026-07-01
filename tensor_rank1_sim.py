@@ -651,6 +651,38 @@ class TensorRank1State:
     def families(self):
         return int(self.base_weight_1.shape[0])
 
+    def family_capacity_version(self):
+        return int(getattr(self, '_family_capacity_version', 0))
+
+    def grow_family_capacity(self, new_capacity):
+        new_capacity = int(new_capacity)
+        old_capacity = self.families
+        if new_capacity <= old_capacity:
+            return
+        extra = new_capacity - old_capacity
+        self.base_weight_1 = torch.cat((
+            self.base_weight_1,
+            torch.randn(extra, HIDDEN_DIM, INPUT_DIM, device=self.device),
+        ), dim=0)
+        self.base_weight_2 = torch.cat((
+            self.base_weight_2,
+            torch.randn(extra, OUTPUT_DIM, HIDDEN_DIM, device=self.device),
+        ), dim=0)
+        extra_u_1 = torch.randn(extra, HIDDEN_DIM, device=self.device)
+        extra_v_1 = torch.randn(extra, INPUT_DIM, device=self.device)
+        extra_u_2 = torch.randn(extra, OUTPUT_DIM, device=self.device)
+        extra_v_2 = torch.randn(extra, HIDDEN_DIM, device=self.device)
+        for index in range(extra):
+            normalize_rank1_factors_(extra_u_1[index], extra_v_1[index])
+            normalize_rank1_factors_(extra_u_2[index], extra_v_2[index])
+        self.u_1 = torch.cat((self.u_1, extra_u_1), dim=0)
+        self.v_1 = torch.cat((self.v_1, extra_v_1), dim=0)
+        self.u_2 = torch.cat((self.u_2, extra_u_2), dim=0)
+        self.v_2 = torch.cat((self.v_2, extra_v_2), dim=0)
+        self.refresh_base_weight_matmul_cache()
+        self.single_active_family_id = None
+        self._family_capacity_version = self.family_capacity_version() + 1
+
     @property
     def playable_shape(self):
         return self.grid.shape[0] - 4, self.grid.shape[1] - 4
@@ -707,6 +739,30 @@ class TensorRank1State:
 
     def alive_mask(self):
         return self.health > 0
+
+    def live_family_mask(self):
+        used = torch.zeros(self.families, device=self.device, dtype=torch.bool)
+        alive = self.alive_mask()
+        if bool(alive.any()):
+            used[self.family_index[alive]] = True
+        return used
+
+    def live_family_count(self):
+        return int(self.live_family_mask().sum().item())
+
+    def next_static_family_slot(self, family_count):
+        family_count = int(family_count)
+        used = self.live_family_mask()
+        if family_count < self.families and not bool(used[family_count]):
+            return family_count, family_count + 1
+
+        reusable = torch.nonzero(~used, as_tuple=False).reshape(-1)
+        if reusable.numel() == 0:
+            family_id = self.families
+            self.grow_family_capacity(max(self.families * 2, self.families + 1))
+            return family_id, family_id + 1
+        family_id = int(reusable[0].item())
+        return family_id, max(family_count, family_id + 1)
 
     def gather_inputs(self):
         neighbor_indices = self.flat_positions[:, None] + self.neighbor_flat_offsets[None, :]
@@ -1025,12 +1081,15 @@ class TensorRank1State:
             coeff_scale=npd.FACTORED_WAVE_COEFF_SCALE):
         count = int(count)
         family_count = int(family_count)
-        if count <= 0 or family_count >= self.families:
+        if count <= 0:
             return 0, family_count
         inactive_slots = torch.nonzero(self.health <= 0, as_tuple=False).reshape(-1)
         empties = self.empty_flat_positions()
         spawn_count = min(count, int(inactive_slots.shape[0]), int(empties.shape[0]))
         if spawn_count <= 0:
+            return 0, family_count
+        new_family_id, family_count = self.next_static_family_slot(family_count)
+        if new_family_id is None:
             return 0, family_count
 
         slot_selection = torch.randperm(inactive_slots.shape[0], device=self.device)[:spawn_count]
@@ -1048,7 +1107,6 @@ class TensorRank1State:
             v_2,
         ) = self.weighted_survivor_family()
 
-        new_family_id = family_count
         self.base_weight_1[new_family_id] = base_weight_1
         self.base_weight_2[new_family_id] = base_weight_2
         self.refresh_base_weight_matmul_cache_row(new_family_id)
@@ -1073,7 +1131,7 @@ class TensorRank1State:
         grid_flat[new_flat_positions] = 1
         index_flat[new_flat_positions] = slots.to(self.index_grid.dtype)
         self.single_active_family_id = None
-        return spawn_count, family_count + 1
+        return spawn_count, family_count
 
     def compact(self, alive):
         self.sync_positions_from_flat()
@@ -1348,6 +1406,10 @@ def benchmark_tensor_state(
         if last_active_cells is not None:
             last_active_cells += int(spawned)
 
+    def clear_cuda_graphs_if_family_capacity_changed(previous_version):
+        if state.family_capacity_version() != previous_version:
+            graph_block_runners.clear()
+
     def invalidate_active_cell_count():
         nonlocal last_active_cells
         last_active_cells = None
@@ -1469,11 +1531,13 @@ def benchmark_tensor_state(
         while _step < steps:
             if static_refill_empty and _step % static_refill_check_every == 0:
                 if active_cell_count_for_refill_check() == 0:
+                    previous_family_version = state.family_capacity_version()
                     spawned, active_family_count = state.append_static_weighted_wave(
                         active_family_count,
                         empty_refill_size(),
                         initial_health=wave_initial_health,
                     )
+                    clear_cuda_graphs_if_family_capacity_changed(previous_family_version)
                     apply_known_spawn_count(spawned)
                     waves_spawned += spawned
                     segment_waves_spawned += spawned
@@ -1518,11 +1582,13 @@ def benchmark_tensor_state(
             if wave_every > 0 and _step % wave_every == 0:
                 round_wave_size = scheduled_wave_size()
                 if static_capacity:
+                    previous_family_version = state.family_capacity_version()
                     spawned, active_family_count = state.append_static_weighted_wave(
                         active_family_count,
                         round_wave_size,
                         initial_health=wave_initial_health,
                     )
+                    clear_cuda_graphs_if_family_capacity_changed(previous_family_version)
                     apply_known_spawn_count(spawned)
                     waves_spawned += spawned
                     segment_waves_spawned += spawned

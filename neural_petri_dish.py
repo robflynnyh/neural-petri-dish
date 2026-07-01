@@ -1106,12 +1106,15 @@ def main_tensor_rank1(args):
             last_active_cells += int(spawned)
 
     def spawn_wave(count):
-        nonlocal active_family_count
+        nonlocal active_family_count, graph_runner
+        previous_family_version = state.family_capacity_version()
         spawned, active_family_count = state.append_static_weighted_wave(
             active_family_count,
             count,
             initial_health=args.tensor_wave_initial_health,
         )
+        if state.family_capacity_version() != previous_family_version:
+            graph_runner = None
         apply_spawn_count(spawned)
         return spawned
 

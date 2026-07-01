@@ -674,6 +674,61 @@ def test_tensor_rank1_fixed_capacity_static_wave_keeps_shapes_cpu():
     assert_tensor_state_position_invariants(state)
 
 
+def test_tensor_rank1_static_wave_reuses_dead_family_slot_cpu():
+    torch.manual_seed(123)
+    state = TensorRank1State.fixed_capacity(
+        active_cells=4,
+        height=10,
+        width=10,
+        active_families=2,
+        family_capacity=2,
+        device=torch.device('cpu'),
+        initial_health=3,
+        cell_capacity=10,
+    )
+    state.family_index[:4] = torch.tensor([0, 0, 1, 1], device=state.device)
+    state.health[:2] = 0
+    survivor_family_weight = state.base_weight_1[1].clone()
+
+    spawned, family_count = state.append_static_weighted_wave(2, 3, initial_health=7)
+
+    assert spawned == 3
+    assert family_count == 2
+    assert state.families == 2
+    assert state.live_family_count() == 2
+    assert torch.equal(state.family_index[state.health == 7], torch.zeros(3, dtype=state.family_index.dtype))
+    assert torch.allclose(state.base_weight_1[1], survivor_family_weight)
+    assert_tensor_state_base_matmul_cache(state)
+    assert_tensor_state_position_invariants(state)
+
+
+def test_tensor_rank1_static_wave_grows_when_all_family_slots_are_live_cpu():
+    torch.manual_seed(123)
+    state = TensorRank1State.fixed_capacity(
+        active_cells=4,
+        height=10,
+        width=10,
+        active_families=2,
+        family_capacity=2,
+        device=torch.device('cpu'),
+        initial_health=3,
+        cell_capacity=10,
+    )
+    state.family_index[:4] = torch.tensor([0, 0, 1, 1], device=state.device)
+    version = state.family_capacity_version()
+
+    spawned, family_count = state.append_static_weighted_wave(2, 3, initial_health=7)
+
+    assert spawned == 3
+    assert family_count == 3
+    assert state.families == 4
+    assert state.family_capacity_version() == version + 1
+    assert state.live_family_count() == 3
+    assert state.family_index[state.health == 7].eq(2).all()
+    assert_tensor_state_base_matmul_cache(state)
+    assert_tensor_state_position_invariants(state)
+
+
 def test_tensor_rank1_flat_empty_positions_match_position_view():
     torch.manual_seed(123)
     state = TensorRank1State.random(
