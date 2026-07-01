@@ -6,9 +6,10 @@ import torch
 import neural_petri_dish as npd
 
 
-INPUT_DIM = 33
-HIDDEN_DIM = 9
-OUTPUT_DIM = 9
+NEIGHBOR_INPUT_DIM = npd.NEIGHBOR_INPUT_DIM
+INPUT_DIM = npd.NETWORK_INPUT_DIM
+HIDDEN_DIM = npd.HIDDEN_DIM
+OUTPUT_DIM = npd.OUTPUT_DIM
 GRID_DTYPE = torch.int8
 INDEX_GRID_DTYPE = torch.int32
 MAX_HEALTH = 15
@@ -143,8 +144,8 @@ def snapshot_combat_step_tensors(
         direction_flat_deltas):
     inputs = torch.empty(flat_positions.shape[0], INPUT_DIM, device=grid.device)
     neighbor_indices = flat_positions[:, None] + neighbor_flat_offsets[None, :]
-    inputs[:, :24] = grid.reshape(-1)[neighbor_indices]
-    inputs[:, 24:] = sanitize_recurrent_state(recurrent_state)
+    inputs[:, :NEIGHBOR_INPUT_DIM] = grid.reshape(-1)[neighbor_indices]
+    inputs[:, NEIGHBOR_INPUT_DIM:] = sanitize_recurrent_state(recurrent_state)
 
     selected_base_weight_1 = base_weight_1[family_index]
     selected_v_1 = v_1[family_index]
@@ -232,8 +233,8 @@ def snapshot_combat_step_tensors_rebuild_grid(
         direction_flat_deltas):
     inputs = torch.empty(flat_positions.shape[0], INPUT_DIM, device=grid.device)
     neighbor_indices = flat_positions[:, None] + neighbor_flat_offsets[None, :]
-    inputs[:, :24] = grid.reshape(-1)[neighbor_indices]
-    inputs[:, 24:] = sanitize_recurrent_state(recurrent_state)
+    inputs[:, :NEIGHBOR_INPUT_DIM] = grid.reshape(-1)[neighbor_indices]
+    inputs[:, NEIGHBOR_INPUT_DIM:] = sanitize_recurrent_state(recurrent_state)
 
     selected_base_weight_1 = base_weight_1[family_index]
     selected_v_1 = v_1[family_index]
@@ -328,8 +329,8 @@ def snapshot_combat_step_tensors_family_basis_rebuild_grid(
     # derives the same ternary neighbor encoding as grid: border=-1, empty=0,
     # occupied=1. This avoids maintaining a duplicate binary occupancy grid.
     neighbor_values = index_flat[neighbor_indices]
-    inputs[:, :24] = (neighbor_values >= 0).to(inputs.dtype) - (neighbor_values == -2).to(inputs.dtype)
-    inputs[:, 24:] = sanitize_recurrent_state(recurrent_state)
+    inputs[:, :NEIGHBOR_INPUT_DIM] = (neighbor_values >= 0).to(inputs.dtype) - (neighbor_values == -2).to(inputs.dtype)
+    inputs[:, NEIGHBOR_INPUT_DIM:] = sanitize_recurrent_state(recurrent_state)
 
     family_count = base_weight_1_matmul.shape[1] // HIDDEN_DIM
     base_hidden_flat = inputs.matmul(base_weight_1_matmul)
@@ -962,8 +963,8 @@ class TensorRank1State:
         neighbor_indices = self.flat_positions[:, None] + self.neighbor_flat_offsets[None, :]
         neighbors = self.grid.reshape(-1)[neighbor_indices]
         inputs = self.input_buffer()
-        inputs[:, :24] = neighbors
-        inputs[:, 24:] = sanitize_recurrent_state(self.recurrent_state)
+        inputs[:, :NEIGHBOR_INPUT_DIM] = neighbors
+        inputs[:, NEIGHBOR_INPUT_DIM:] = sanitize_recurrent_state(self.recurrent_state)
         return inputs
 
     def forward_actions(self):

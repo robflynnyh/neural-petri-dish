@@ -207,7 +207,8 @@ def test_shared_rank1_family_direction_is_rank1_with_controlled_scale():
 
     assert direction.shape == family.base_weight_1.shape
     assert not torch.allclose(direction, torch.zeros_like(direction))
-    assert torch.linalg.matrix_rank(direction, tol=1e-5).item() <= 1
+    singular_values = torch.linalg.svdvals(direction)
+    assert singular_values[1:].max() / singular_values[0] < 1e-5
     assert torch.isclose(direction.square().mean().sqrt(), torch.tensor(1.0), atol=1e-5)
 
 

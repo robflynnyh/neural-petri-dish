@@ -8,9 +8,9 @@ from pathlib import Path
 import torch
 
 
-INPUT_DIM = 33
 NEIGHBOR_DIM = 24
-HIDDEN_DIM = 9
+HIDDEN_DIM = 64
+INPUT_DIM = NEIGHBOR_DIM + HIDDEN_DIM
 OUTPUT_DIM = 9
 MODES = ('shared_rank1_factored',)
 DEFAULT_MODE = 'shared_rank1_factored'

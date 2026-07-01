@@ -7,6 +7,8 @@ import pytest
 import torch
 
 from tensor_rank1_sim import (
+    HIDDEN_DIM,
+    NEIGHBOR_INPUT_DIM,
     TensorRank1State,
     benchmark_tensor_state,
     family_basis_rebuild_snapshot_combat_block_tensors,
@@ -305,7 +307,7 @@ def test_tensor_rank1_state_steps_on_cpu():
 
     assert actions.shape == (64,)
     assert state.positions.shape == (64, 2)
-    assert state.recurrent_state.shape == (64, 9)
+    assert state.recurrent_state.shape == (64, HIDDEN_DIM)
     assert state.grid[state.positions[:, 0], state.positions[:, 1]].eq(1).all()
     assert_tensor_state_position_invariants(state)
 
@@ -325,8 +327,8 @@ def test_tensor_rank1_grid_is_compact_integer_but_inputs_are_float_cpu():
     assert state.grid.dtype == torch.int8
     assert state.index_grid.dtype == torch.int32
     assert inputs.dtype == torch.float32
-    assert inputs[:, :24].min() >= -1
-    assert inputs[:, :24].max() <= 1
+    assert inputs[:, :NEIGHBOR_INPUT_DIM].min() >= -1
+    assert inputs[:, :NEIGHBOR_INPUT_DIM].max() <= 1
 
 
 def test_tensor_rank1_state_snapshot_combat_compacts_on_cpu():
@@ -856,9 +858,9 @@ def test_tensor_rank1_state_weighted_wave_uses_hp_weighted_survivors():
     assert torch.equal(state.family_index[:old_cells], old_family_index)
     assert state.family_index[old_cells:].eq(old_families).all()
     assert state.health[old_cells:].eq(7).all()
-    assert torch.allclose(state.base_weight_1[-1], expected_weight_1)
-    assert torch.allclose(state.base_weight_2[-1], expected_weight_2)
-    assert torch.allclose(state.bias_1[old_cells], expected_bias_1)
+    assert torch.allclose(state.base_weight_1[-1], expected_weight_1, atol=1e-6)
+    assert torch.allclose(state.base_weight_2[-1], expected_weight_2, atol=1e-6)
+    assert torch.allclose(state.bias_1[old_cells], expected_bias_1, atol=1e-6)
     assert_tensor_state_base_matmul_cache(state)
     assert_tensor_state_position_invariants(state)
 

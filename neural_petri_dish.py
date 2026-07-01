@@ -12,7 +12,11 @@ import time
 
 from rank1_genome import (
     FACTORED_WAVE_COEFF_SCALE,
+    HIDDEN_DIM,
     LinearGenes,
+    NEIGHBOR_INPUT_DIM,
+    NETWORK_INPUT_DIM,
+    OUTPUT_DIM,
     SharedRank1Family,
     factored_gene_batch,
     factored_gene_tensors,
@@ -166,8 +170,8 @@ class Cell:
     '''
     def __init__(self, pos, genes=None, initialize_genes=True):
         if genes is None and initialize_genes:
-            self.linear = LinearGenes(33, 9)
-            self.linear2 = LinearGenes(9, 9)
+            self.linear = LinearGenes(NETWORK_INPUT_DIM, HIDDEN_DIM)
+            self.linear2 = LinearGenes(HIDDEN_DIM, OUTPUT_DIM)
         elif genes is not None:
             self.linear = LinearGenes(
                 weight=genes['weight_1'],
@@ -184,16 +188,16 @@ class Cell:
         else:
             self.linear = None
             self.linear2 = None
-        self.input_buffer = np.zeros(33, dtype=np.float32)
-        self.hidden_buffer = np.zeros(9, dtype=np.float32)
-        self.output_buffer = np.zeros(9, dtype=np.float32)
+        self.input_buffer = np.zeros(NETWORK_INPUT_DIM, dtype=np.float32)
+        self.hidden_buffer = np.zeros(HIDDEN_DIM, dtype=np.float32)
+        self.output_buffer = np.zeros(OUTPUT_DIM, dtype=np.float32)
         self.y = int(pos[0])
         self.x = int(pos[1])
         self.pos = [self.y, self.x]
         self.health = 2
         self.max_health = 15
         self.age = 0
-        self.prev_state = np.zeros(9, dtype=np.float32)
+        self.prev_state = np.zeros(HIDDEN_DIM, dtype=np.float32)
         self.diversity = None
         self.rank1_family = None
         self.rank1_coeff_1 = 0.0
@@ -216,9 +220,9 @@ class Cell:
         buffer = self.input_buffer
         if neighbors.shape[0] == 25:
             buffer[:12] = neighbors[:12]
-            buffer[12:24] = neighbors[13:]
+            buffer[12:NEIGHBOR_INPUT_DIM] = neighbors[13:]
         else:
-            buffer[:24] = neighbors
+            buffer[:NEIGHBOR_INPUT_DIM] = neighbors
         return self.forward_from_input_buffer()
 
     def forward_neighbors25(self, neighbors):
@@ -228,8 +232,8 @@ class Cell:
     def forward_flat_neighbors25(self, flat):
         buffer = self.input_buffer
         buffer[:12] = flat[:12]
-        buffer[12:24] = flat[13:]
-        buffer[24:] = self.prev_state
+        buffer[12:NEIGHBOR_INPUT_DIM] = flat[13:]
+        buffer[NEIGHBOR_INPUT_DIM:] = self.prev_state
         hidden = self.hidden_buffer
         output = self.output_buffer
         np.dot(self.linear.weight_np, buffer, out=hidden)
@@ -242,7 +246,7 @@ class Cell:
 
     def forward_from_input_buffer(self):
         buffer = self.input_buffer
-        buffer[24:] = self.prev_state
+        buffer[NEIGHBOR_INPUT_DIM:] = self.prev_state
         hidden = self.hidden_buffer
         output = self.output_buffer
         np.dot(self.linear.weight_np, buffer, out=hidden)
@@ -703,13 +707,13 @@ def planned_packed_family_action_list(game, groups, device, cell_count):
     if not packed_cells:
         return None
 
-    inputs = np.empty((len(packed_cells), 33), dtype=np.float32)
+    inputs = np.empty((len(packed_cells), NETWORK_INPUT_DIM), dtype=np.float32)
     positions = np.asarray([(cell.y, cell.x) for cell in packed_cells], dtype=np.int64)
-    inputs[:, :24] = game.grid[
+    inputs[:, :NEIGHBOR_INPUT_DIM] = game.grid[
         positions[:, 0, None] + NEIGHBOR_OFFSETS[None, :, 0],
         positions[:, 1, None] + NEIGHBOR_OFFSETS[None, :, 1],
     ]
-    inputs[:, 24:] = np.asarray([cell.prev_state for cell in packed_cells], dtype=np.float32)
+    inputs[:, NEIGHBOR_INPUT_DIM:] = np.asarray([cell.prev_state for cell in packed_cells], dtype=np.float32)
     coeff_1 = np.asarray([cell.rank1_coeff_1 for cell in packed_cells], dtype=np.float32)
     coeff_2 = np.asarray([cell.rank1_coeff_2 for cell in packed_cells], dtype=np.float32)
     bias_1 = np.asarray([cell.linear.bias_np for cell in packed_cells], dtype=np.float32)
@@ -771,13 +775,13 @@ def planned_grouped_family_action_list(game, groups, device, cell_count):
     planned = [None] * cell_count
     for family, group in groups.items():
         group_cells = [cell for _planned_index, cell in group]
-        inputs = np.empty((len(group_cells), 33), dtype=np.float32)
+        inputs = np.empty((len(group_cells), NETWORK_INPUT_DIM), dtype=np.float32)
         positions = np.asarray([(cell.y, cell.x) for cell in group_cells], dtype=np.int64)
-        inputs[:, :24] = game.grid[
+        inputs[:, :NEIGHBOR_INPUT_DIM] = game.grid[
             positions[:, 0, None] + NEIGHBOR_OFFSETS[None, :, 0],
             positions[:, 1, None] + NEIGHBOR_OFFSETS[None, :, 1],
         ]
-        inputs[:, 24:] = np.asarray([cell.prev_state for cell in group_cells], dtype=np.float32)
+        inputs[:, NEIGHBOR_INPUT_DIM:] = np.asarray([cell.prev_state for cell in group_cells], dtype=np.float32)
         coeff_1 = np.asarray([cell.rank1_coeff_1 for cell in group_cells], dtype=np.float32)
         coeff_2 = np.asarray([cell.rank1_coeff_2 for cell in group_cells], dtype=np.float32)
         bias_1 = np.asarray([cell.linear.bias_np for cell in group_cells], dtype=np.float32)
@@ -1337,8 +1341,8 @@ def load_state(name):
             cell.y = int(cell.pos[0])
             cell.x = int(cell.pos[1])
         cell.pos = [int(cell.y), int(cell.x)]
-        if getattr(cell, 'prev_state', None) is None:
-            cell.prev_state = np.zeros(9, dtype=np.float32)
+        if getattr(cell, 'prev_state', None) is None or cell.prev_state.shape[0] != HIDDEN_DIM:
+            cell.prev_state = np.zeros(HIDDEN_DIM, dtype=np.float32)
     game._rebuild_cell_index()
     return game
 

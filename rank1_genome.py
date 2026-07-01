@@ -5,6 +5,10 @@ import torch
 # Rank-1 directions are normalized to unit RMS, so this is the approximate
 # per-wave perturbation RMS added to the shared base weights.
 FACTORED_WAVE_COEFF_SCALE = 0.3
+NEIGHBOR_INPUT_DIM = 24
+HIDDEN_DIM = 64
+OUTPUT_DIM = 9
+NETWORK_INPUT_DIM = NEIGHBOR_INPUT_DIM + HIDDEN_DIM
 
 
 def clone_tensor(tensor):
@@ -42,8 +46,8 @@ class SharedRank1Family:
 
     def __init__(self, genes=None):
         if genes is None:
-            linear = LinearGenes(33, 9)
-            linear2 = LinearGenes(9, 9)
+            linear = LinearGenes(NETWORK_INPUT_DIM, HIDDEN_DIM)
+            linear2 = LinearGenes(HIDDEN_DIM, OUTPUT_DIM)
             genes = {
                 'weight_1': linear.weight,
                 'bias_1': linear.bias,
