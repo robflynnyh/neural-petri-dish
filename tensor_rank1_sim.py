@@ -16,6 +16,8 @@ GRID_DTYPE = torch.int8
 INDEX_GRID_DTYPE = torch.int32
 MAX_HEALTH = 15
 KILL_REWARD = npd.KILL_HEALTH_REWARD
+FOOD_REWARD = npd.FOOD_HEALTH_REWARD
+FOOD_INPUT_VALUE = npd.FOOD_INPUT_VALUE
 BASE_ATTACK_DAMAGE = 1
 LONE_TARGET_DAMAGE_BONUS = 1
 _COMPILED_SNAPSHOT_COMBAT_STEP = {}
@@ -75,6 +77,53 @@ def reset_index_grid(index_grid):
 
 def make_index_grid(height, width, device):
     return reset_index_grid(torch.empty(height + 2, width + 4, device=device, dtype=INDEX_GRID_DTYPE))
+
+
+def make_food_grid(height, width, device):
+    return torch.zeros(height + 2, width + 4, device=device, dtype=GRID_DTYPE)
+
+
+def fixed_food_flat_positions(height, width, count, device):
+    count = int(count)
+    if count <= 0:
+        return torch.empty(0, device=device, dtype=torch.long)
+    playable_rows = max(int(height) - 2, 0)
+    playable_cols = max(int(width), 0)
+    if playable_rows == 0 or playable_cols == 0:
+        return torch.empty(0, device=device, dtype=torch.long)
+
+    rows = max(1, int(count ** 0.5))
+    while rows > 1 and count % rows != 0:
+        rows -= 1
+    cols = max(1, (count + rows - 1) // rows)
+    row_values = torch.linspace(2, int(height) - 1, rows, device=device).round().to(torch.long)
+    col_values = torch.linspace(2, int(width) + 1, cols, device=device).round().to(torch.long)
+    positions = torch.cartesian_prod(row_values, col_values)[:count]
+    unique_positions = torch.unique(positions, dim=0)
+    if unique_positions.shape[0] < min(count, playable_rows * playable_cols):
+        all_positions = torch.cartesian_prod(
+            torch.arange(2, int(height), device=device, dtype=torch.long),
+            torch.arange(2, int(width) + 2, device=device, dtype=torch.long),
+        )
+        combined = torch.cat((unique_positions, all_positions), dim=0)
+        unique_positions = torch.unique(combined, dim=0)[:count]
+    return unique_positions[:, 0] * (int(width) + 4) + unique_positions[:, 1]
+
+
+def refresh_food_overlay(grid, food_grid):
+    playable_food = food_grid[2:-2, 2:-2]
+    grid[2:-2, 2:-2].copy_(playable_food * FOOD_INPUT_VALUE)
+    return grid
+
+
+def clear_consumed_food(food_grid, target_flat_positions, consumed_food):
+    if food_grid.numel() == 0:
+        return
+    food_grid.reshape(-1)[target_flat_positions] = torch.where(
+        consumed_food,
+        torch.zeros_like(target_flat_positions, dtype=food_grid.dtype),
+        food_grid.reshape(-1)[target_flat_positions],
+    )
 
 
 def flatten_base_weight_1_for_matmul(base_weight_1):
@@ -156,6 +205,7 @@ def snapshot_attack_damage(hits_occupied, target_flat_positions, attacker_indice
 def snapshot_combat_step_tensors(
         grid,
         index_grid,
+        food_grid,
         flat_positions,
         health,
         recurrent_state,
@@ -196,7 +246,9 @@ def snapshot_combat_step_tensors(
     directions = action_directions(actions)
     attack_intents = action_attack_intents(actions)
     target_flat_positions = flat_positions + direction_flat_deltas[directions]
-    target_indices = index_grid.reshape(-1)[target_flat_positions]
+    index_flat = index_grid.reshape(-1)
+    food_flat = food_grid.reshape(-1)
+    target_indices = index_flat[target_flat_positions]
     active = health > 0
     targeted = active & (directions != 0)
     move_intents = targeted & ~attack_intents
@@ -229,8 +281,7 @@ def snapshot_combat_step_tensors(
 
     alive = new_health > 0
     grid_flat = grid.reshape(-1)
-    index_flat = index_grid.reshape(-1)
-    grid_flat[old_flat_positions] = 0
+    grid_flat[old_flat_positions] = food_flat[old_flat_positions] * FOOD_INPUT_VALUE
     index_flat[old_flat_positions] = -1
     indices = attacker_indices
     write_indices = torch.where(alive, indices, torch.full_like(indices, -1))
@@ -242,7 +293,15 @@ def snapshot_combat_step_tensors(
         include_self=True,
     )
     owns_position = index_flat[new_flat_positions] == indices
+    consumed_food = alive & owns_position & hits_empty & (food_flat[target_flat_positions] > 0)
+    new_health = torch.where(
+        consumed_food,
+        (new_health + torch.as_tensor(FOOD_REWARD, device=grid.device, dtype=health.dtype)).clamp_max(MAX_HEALTH),
+        new_health,
+    )
+    clear_consumed_food(food_grid, target_flat_positions, consumed_food)
     new_health = torch.where(alive & owns_position, new_health, torch.zeros_like(new_health))
+    refresh_food_overlay(grid, food_grid)
     grid_flat[new_flat_positions] = (index_flat[new_flat_positions] >= 0).to(grid.dtype)
     return new_flat_positions, new_health, hidden, actions
 
@@ -250,6 +309,7 @@ def snapshot_combat_step_tensors(
 def snapshot_combat_step_tensors_rebuild_grid(
         grid,
         index_grid,
+        food_grid,
         flat_positions,
         health,
         recurrent_state,
@@ -289,7 +349,9 @@ def snapshot_combat_step_tensors_rebuild_grid(
     directions = action_directions(actions)
     attack_intents = action_attack_intents(actions)
     target_flat_positions = flat_positions + direction_flat_deltas[directions]
-    target_indices = index_grid.reshape(-1)[target_flat_positions]
+    index_flat = index_grid.reshape(-1)
+    food_flat = food_grid.reshape(-1)
+    target_indices = index_flat[target_flat_positions]
     active = health > 0
     targeted = active & (directions != 0)
     move_intents = targeted & ~attack_intents
@@ -322,8 +384,7 @@ def snapshot_combat_step_tensors_rebuild_grid(
 
     alive = new_health > 0
     index_grid[2:-2, 2:-2].fill_(-1)
-    grid[2:-2, 2:-2].zero_()
-    index_flat = index_grid.reshape(-1)
+    refresh_food_overlay(grid, food_grid)
     grid_flat = grid.reshape(-1)
     indices = attacker_indices
     write_indices = torch.where(alive, indices, torch.full_like(indices, -1))
@@ -335,13 +396,22 @@ def snapshot_combat_step_tensors_rebuild_grid(
         include_self=True,
     )
     owns_position = index_flat[new_flat_positions] == indices
+    consumed_food = alive & owns_position & hits_empty & (food_flat[target_flat_positions] > 0)
+    new_health = torch.where(
+        consumed_food,
+        (new_health + torch.as_tensor(FOOD_REWARD, device=grid.device, dtype=health.dtype)).clamp_max(MAX_HEALTH),
+        new_health,
+    )
+    clear_consumed_food(food_grid, target_flat_positions, consumed_food)
     new_health = torch.where(alive & owns_position, new_health, torch.zeros_like(new_health))
+    refresh_food_overlay(grid, food_grid)
     grid_flat[new_flat_positions] = (index_flat[new_flat_positions] >= 0).to(grid.dtype)
     return new_flat_positions, new_health, hidden, actions
 
 
 def snapshot_combat_step_tensors_family_basis_rebuild_grid(
         index_grid,
+        food_grid,
         flat_positions,
         health,
         stationary_steps,
@@ -369,7 +439,14 @@ def snapshot_combat_step_tensors_family_basis_rebuild_grid(
     # derives the same ternary neighbor encoding as grid: border=-1, empty=0,
     # occupied=1. This avoids maintaining a duplicate binary occupancy grid.
     neighbor_values = index_flat[neighbor_indices]
-    inputs[:, :NEIGHBOR_INPUT_DIM] = (neighbor_values >= 0).to(inputs.dtype) - (neighbor_values == -2).to(inputs.dtype)
+    food_flat = food_grid.reshape(-1)
+    neighbor_food = food_flat[neighbor_indices] > 0
+    empty_food = (neighbor_values == -1) & neighbor_food
+    inputs[:, :NEIGHBOR_INPUT_DIM] = (
+        (neighbor_values >= 0).to(inputs.dtype)
+        - (neighbor_values == -2).to(inputs.dtype)
+        + empty_food.to(inputs.dtype) * FOOD_INPUT_VALUE
+    )
     inputs[:, NEIGHBOR_INPUT_DIM:] = sanitize_recurrent_state(recurrent_state)
 
     family_count = base_weight_1_matmul.shape[1] // HIDDEN_DIM
@@ -440,6 +517,13 @@ def snapshot_combat_step_tensors_family_basis_rebuild_grid(
         include_self=True,
     )
     owns_position = index_flat[new_flat_positions] == scatter_indices
+    consumed_food = alive & owns_position & hits_empty & (food_flat[target_flat_positions] > 0)
+    new_health = torch.where(
+        consumed_food,
+        (new_health + torch.as_tensor(FOOD_REWARD, device=index_grid.device, dtype=health.dtype)).clamp_max(MAX_HEALTH),
+        new_health,
+    )
+    clear_consumed_food(food_grid, target_flat_positions, consumed_food)
     new_health = torch.where(alive & owns_position, new_health, torch.zeros_like(new_health))
     new_stationary_steps = torch.where(
         new_health > 0,
@@ -490,6 +574,7 @@ def family_basis_rebuild_snapshot_combat_block_tensors(block_steps):
 
     def block_fn(
             index_grid,
+            food_grid,
             flat_positions,
             health,
             stationary_steps,
@@ -513,6 +598,7 @@ def family_basis_rebuild_snapshot_combat_block_tensors(block_steps):
         for _ in range(block_steps):
             flat_positions, health, stationary_steps, recurrent_state, _actions = snapshot_combat_step_tensors_family_basis_rebuild_grid(
                 index_grid,
+                food_grid,
                 flat_positions,
                 health,
                 stationary_steps,
@@ -565,6 +651,7 @@ class CudaGraphFamilyBasisBlockRunner:
         )
         self.graph = torch.cuda.CUDAGraph()
         original_index_grid = state.index_grid.clone()
+        original_food_grid = state.food_grid.clone()
         original_flat_positions = state.flat_positions.clone()
         original_health = state.health.clone()
         original_stationary_steps = state.stationary_steps.clone()
@@ -579,6 +666,7 @@ class CudaGraphFamilyBasisBlockRunner:
             state.stationary_steps.copy_(stationary_steps)
             state.recurrent_state.copy_(recurrent_state)
         state.index_grid.copy_(original_index_grid)
+        state.food_grid.copy_(original_food_grid)
         state.flat_positions.copy_(original_flat_positions)
         state.health.copy_(original_health)
         state.stationary_steps.copy_(original_stationary_steps)
@@ -595,6 +683,8 @@ class CudaGraphFamilyBasisBlockRunner:
 class TensorRank1State:
     grid: torch.Tensor
     index_grid: torch.Tensor
+    food_grid: torch.Tensor
+    food_flat_positions: torch.Tensor
     positions: torch.Tensor
     flat_positions: torch.Tensor
     health: torch.Tensor
@@ -647,6 +737,8 @@ class TensorRank1State:
             raise ValueError('cells must not exceed playable grid positions')
         grid = make_grid(height, width, device)
         index_grid = make_index_grid(height, width, device)
+        food_grid = make_food_grid(height, width, device)
+        food_flat_positions = fixed_food_flat_positions(height, width, npd.FOOD_PER_ROUND, device)
         flat_positions = torch.randperm(playable_rows * playable_cols, device=device)[:cells]
         positions = torch.empty(cells, 2, device=device, dtype=torch.long)
         positions[:, 0] = flat_positions.div(playable_cols, rounding_mode='floor') + 2
@@ -677,9 +769,11 @@ class TensorRank1State:
             normalize_rank1_factors_(u_1[family_id], v_1[family_id])
             normalize_rank1_factors_(u_2[family_id], v_2[family_id])
 
-        return cls(
+        state = cls(
             grid=grid,
             index_grid=index_grid,
+            food_grid=food_grid,
+            food_flat_positions=food_flat_positions,
             positions=positions,
             flat_positions=grid_flat_positions,
             health=health,
@@ -719,6 +813,8 @@ class TensorRank1State:
             evolution_anchor_bias_2=family_bias_2[0].clone(),
             single_active_family_id=0 if families == 1 else None,
         )
+        state.spawn_fixed_food()
+        return state
 
     @classmethod
     def fixed_capacity(
@@ -950,6 +1046,7 @@ class TensorRank1State:
     def family_basis_block_args(self):
         return (
             self.index_grid,
+            self.food_grid,
             self.flat_positions,
             self.health,
             self.stationary_steps,
@@ -974,6 +1071,16 @@ class TensorRank1State:
 
     def alive_mask(self):
         return self.health > 0
+
+    def spawn_fixed_food(self):
+        self.food_grid.zero_()
+        if self.food_flat_positions.numel() > 0:
+            self.food_grid.reshape(-1)[self.food_flat_positions] = 1
+        refresh_food_overlay(self.grid, self.food_grid)
+        alive = self.alive_mask()
+        if bool(alive.any()):
+            self.grid.reshape(-1)[self.flat_positions[alive]] = 1
+        return int(self.food_flat_positions.numel())
 
     def apply_round_transition_health_cost(self, compact_dead=False):
         alive = self.health > 0
@@ -1126,10 +1233,18 @@ class TensorRank1State:
         old_flat_positions = self.flat_positions
         directions = action_directions(actions)
         target_flat_positions = self.flat_positions + self.direction_flat_deltas[directions]
+        food_flat = self.food_grid.reshape(-1)
         target_indices = self.index_grid.reshape(-1)[target_flat_positions]
         can_move = (directions != 0) & (target_indices == -1) & ~action_attack_intents(actions)
         self.flat_positions = torch.where(can_move, target_flat_positions, self.flat_positions)
         health_after_move = apply_movement_health_cost(self.health, can_move)
+        consumed_food = can_move & (food_flat[target_flat_positions] > 0)
+        health_after_move = torch.where(
+            consumed_food,
+            (health_after_move + torch.as_tensor(FOOD_REWARD, device=self.device, dtype=self.health.dtype)).clamp_max(MAX_HEALTH),
+            health_after_move,
+        )
+        clear_consumed_food(self.food_grid, target_flat_positions, consumed_food)
         if sync_positions:
             self.sync_positions_from_flat()
         self.update_grids_incremental(old_flat_positions)
@@ -1143,7 +1258,7 @@ class TensorRank1State:
     def update_grids_incremental(self, old_flat_positions, alive=None):
         grid_flat = self.grid.reshape(-1)
         index_flat = self.index_grid.reshape(-1)
-        grid_flat[old_flat_positions] = 0
+        grid_flat[old_flat_positions] = self.food_grid.reshape(-1)[old_flat_positions] * FOOD_INPUT_VALUE
         index_flat[old_flat_positions] = -1
         if alive is None:
             indices = self.cell_indices().to(self.index_grid.dtype)
@@ -1169,6 +1284,7 @@ class TensorRank1State:
     def rebuild_grids(self):
         reset_grid(self.grid)
         reset_index_grid(self.index_grid)
+        refresh_food_overlay(self.grid, self.food_grid)
         grid_flat = self.grid.reshape(-1)
         index_flat = self.index_grid.reshape(-1)
         alive = self.alive_mask()
@@ -1185,6 +1301,7 @@ class TensorRank1State:
         directions = action_directions(actions)
         attack_intents = action_attack_intents(actions)
         target_flat_positions = self.flat_positions + self.direction_flat_deltas[directions]
+        food_flat = self.food_grid.reshape(-1)
         target_indices = self.index_grid.reshape(-1)[target_flat_positions]
         active = self.alive_mask()
         targeted = active & (directions != 0)
@@ -1233,6 +1350,15 @@ class TensorRank1State:
         alive = self.health > 0
         self.update_grids_incremental(old_flat_positions, alive=alive)
         owns_position = self.index_grid.reshape(-1)[self.flat_positions] == self.index_grid_indices()
+        consumed_food = alive & owns_position & hits_empty & (food_flat[target_flat_positions] > 0)
+        self.health = torch.where(
+            consumed_food,
+            (self.health + torch.as_tensor(FOOD_REWARD, device=self.device, dtype=self.health.dtype)).clamp_max(MAX_HEALTH),
+            self.health,
+        )
+        clear_consumed_food(self.food_grid, target_flat_positions, consumed_food)
+        refresh_food_overlay(self.grid, self.food_grid)
+        self.grid.reshape(-1)[self.flat_positions[alive]] = 1
         self.health = torch.where(
             alive & owns_position,
             self.health,
@@ -1544,6 +1670,7 @@ class TensorRank1State:
             self.flat_positions, self.health, self.recurrent_state, actions = step_fn(
                 self.grid,
                 self.index_grid,
+                self.food_grid,
                 self.flat_positions,
                 self.health,
                 self.recurrent_state,

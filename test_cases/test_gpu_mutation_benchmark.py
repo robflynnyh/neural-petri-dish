@@ -6,6 +6,7 @@ from pathlib import Path
 import pytest
 import torch
 
+import neural_petri_dish as npd
 from tensor_rank1_sim import (
     DIRECTION_OUTPUT_DIM,
     HIDDEN_DIM,
@@ -333,7 +334,7 @@ def test_tensor_rank1_grid_is_compact_integer_but_inputs_are_float_cpu():
     assert state.index_grid.dtype == torch.int32
     assert inputs.dtype == torch.float32
     assert inputs[:, :NEIGHBOR_INPUT_DIM].min() >= -1
-    assert inputs[:, :NEIGHBOR_INPUT_DIM].max() <= 1
+    assert inputs[:, :NEIGHBOR_INPUT_DIM].max() <= npd.FOOD_INPUT_VALUE
 
 
 def test_tensor_rank1_state_snapshot_combat_compacts_on_cpu():
@@ -374,6 +375,7 @@ def test_snapshot_combat_tensor_step_matches_eager_cpu():
     flat_positions, health, recurrent_state, tensor_actions = snapshot_combat_step_tensors(
         tensor_step.grid,
         tensor_step.index_grid,
+        tensor_step.food_grid,
         tensor_step.flat_positions,
         tensor_step.health,
         tensor_step.recurrent_state,
@@ -398,6 +400,7 @@ def test_snapshot_combat_tensor_step_matches_eager_cpu():
     assert torch.allclose(recurrent_state, eager.recurrent_state, atol=1e-6)
     assert torch.equal(tensor_step.grid, eager.grid)
     assert torch.equal(tensor_step.index_grid, eager.index_grid)
+    assert torch.equal(tensor_step.food_grid, eager.food_grid)
 
 
 def test_snapshot_combat_rebuild_grid_step_matches_eager_cpu():
@@ -416,6 +419,7 @@ def test_snapshot_combat_rebuild_grid_step_matches_eager_cpu():
     flat_positions, health, recurrent_state, tensor_actions = snapshot_combat_step_tensors_rebuild_grid(
         tensor_step.grid,
         tensor_step.index_grid,
+        tensor_step.food_grid,
         tensor_step.flat_positions,
         tensor_step.health,
         tensor_step.recurrent_state,
@@ -440,6 +444,7 @@ def test_snapshot_combat_rebuild_grid_step_matches_eager_cpu():
     assert torch.allclose(recurrent_state, eager.recurrent_state, atol=1e-6)
     assert torch.equal(tensor_step.grid, eager.grid)
     assert torch.equal(tensor_step.index_grid, eager.index_grid)
+    assert torch.equal(tensor_step.food_grid, eager.food_grid)
 
 
 def test_snapshot_combat_family_basis_rebuild_step_matches_eager_cpu():
@@ -457,6 +462,7 @@ def test_snapshot_combat_family_basis_rebuild_step_matches_eager_cpu():
     eager_actions = eager.step(movement='snapshot_combat', compact_dead=False, sync_positions=False)
     flat_positions, health, stationary_steps, recurrent_state, tensor_actions = snapshot_combat_step_tensors_family_basis_rebuild_grid(
         tensor_step.index_grid,
+        tensor_step.food_grid,
         tensor_step.flat_positions,
         tensor_step.health,
         tensor_step.stationary_steps,
@@ -485,6 +491,7 @@ def test_snapshot_combat_family_basis_rebuild_step_matches_eager_cpu():
     assert torch.equal(stationary_steps, eager.stationary_steps)
     assert torch.allclose(recurrent_state, eager.recurrent_state, atol=1e-6)
     assert torch.equal(tensor_step.index_grid, eager.index_grid)
+    assert torch.equal(tensor_step.food_grid, eager.food_grid)
 
 
 def test_snapshot_combat_family_basis_rebuild_step_matches_eager_for_multiple_steps_cpu():
@@ -503,6 +510,7 @@ def test_snapshot_combat_family_basis_rebuild_step_matches_eager_for_multiple_st
         eager_actions = eager.step(movement='snapshot_combat', compact_dead=False, sync_positions=False)
         flat_positions, health, stationary_steps, recurrent_state, tensor_actions = snapshot_combat_step_tensors_family_basis_rebuild_grid(
             tensor_step.index_grid,
+            tensor_step.food_grid,
             tensor_step.flat_positions,
             tensor_step.health,
             tensor_step.stationary_steps,
@@ -535,6 +543,7 @@ def test_snapshot_combat_family_basis_rebuild_step_matches_eager_for_multiple_st
         assert torch.equal(tensor_step.stationary_steps, eager.stationary_steps)
         assert torch.allclose(tensor_step.recurrent_state, eager.recurrent_state, atol=1e-6)
         assert torch.equal(tensor_step.index_grid, eager.index_grid)
+        assert torch.equal(tensor_step.food_grid, eager.food_grid)
 
 
 def test_snapshot_combat_family_basis_rebuild_block_matches_eager_cpu():
@@ -554,6 +563,7 @@ def test_snapshot_combat_family_basis_rebuild_block_matches_eager_cpu():
         eager.step(movement='snapshot_combat', compact_dead=False, sync_positions=False)
     flat_positions, health, stationary_steps, recurrent_state = block_fn(
         tensor_step.index_grid,
+        tensor_step.food_grid,
         tensor_step.flat_positions,
         tensor_step.health,
         tensor_step.stationary_steps,
@@ -581,6 +591,7 @@ def test_snapshot_combat_family_basis_rebuild_block_matches_eager_cpu():
     assert torch.equal(stationary_steps, eager.stationary_steps)
     assert torch.allclose(recurrent_state, eager.recurrent_state, atol=1e-6)
     assert torch.equal(tensor_step.index_grid, eager.index_grid)
+    assert torch.equal(tensor_step.food_grid, eager.food_grid)
 
 
 def test_snapshot_combat_stationary_action_damages_and_can_kill_cpu():
@@ -612,6 +623,7 @@ def test_snapshot_combat_stationary_action_damages_and_can_kill_cpu():
     for _ in range(4):
         flat_positions, health, stationary_steps, _recurrent_state, actions = snapshot_combat_step_tensors_family_basis_rebuild_grid(
             state.index_grid,
+            state.food_grid,
             flat_positions,
             health,
             stationary_steps,
@@ -654,6 +666,7 @@ def test_snapshot_combat_family_basis_sanitizes_nan_recurrent_state_cpu():
 
     _flat_positions, _health, _stationary_steps, recurrent_state, actions = snapshot_combat_step_tensors_family_basis_rebuild_grid(
         state.index_grid,
+        state.food_grid,
         state.flat_positions,
         state.health,
         state.stationary_steps,
@@ -824,6 +837,7 @@ def test_snapshot_combat_successful_move_costs_fractional_health_cpu():
     state.flat_positions = state.positions[:, 0] * state.grid_stride + state.positions[:, 1]
     state.health = torch.tensor([2.0], dtype=state.health.dtype)
     state.stationary_steps.zero_()
+    state.food_grid.zero_()
     state.rebuild_grids()
 
     state.apply_snapshot_combat(
@@ -1145,6 +1159,72 @@ def test_tensor_rank1_flat_empty_positions_match_position_view():
     empty_flat = state.empty_flat_positions()
 
     assert torch.equal(empty_flat, empty_positions[:, 0] * state.grid.shape[1] + empty_positions[:, 1])
+
+
+def test_tensor_rank1_fixed_food_spawns_in_same_positions_cpu():
+    torch.manual_seed(123)
+    state = TensorRank1State.random(
+        cells=4,
+        height=12,
+        width=12,
+        families=1,
+        device=torch.device('cpu'),
+    )
+    first_food = state.food_grid.clone()
+    first_positions = state.food_flat_positions.clone()
+
+    state.food_grid.zero_()
+    state.spawn_fixed_food()
+
+    assert int(state.food_grid.sum().item()) == min(npd.FOOD_PER_ROUND, (12 - 2) * 12)
+    assert torch.equal(state.food_flat_positions, first_positions)
+    assert torch.equal(state.food_grid, first_food)
+    empty_food = state.food_grid.bool() & state.index_grid.eq(-1)
+    assert state.grid[empty_food].eq(npd.FOOD_INPUT_VALUE).all()
+
+
+def test_tensor_rank1_move_into_food_consumes_it_and_rewards_health_cpu():
+    torch.manual_seed(123)
+    state = TensorRank1State.random(
+        cells=1,
+        height=12,
+        width=12,
+        families=1,
+        device=torch.device('cpu'),
+        initial_health=10,
+    )
+    food_flat = state.food_flat_positions[
+        state.food_flat_positions.remainder(state.grid_stride) > 2
+    ][0]
+    start_flat = food_flat - 1
+    state.flat_positions[0] = start_flat
+    state.positions[0, 0] = start_flat.div(state.grid_stride, rounding_mode='floor')
+    state.positions[0, 1] = start_flat.remainder(state.grid_stride)
+    state.health[0] = 10
+    state.rebuild_grids()
+    state.spawn_fixed_food()
+
+    state.base_weight_1.zero_()
+    state.base_weight_2.zero_()
+    state.refresh_base_weight_matmul_cache()
+    state.u_1.zero_()
+    state.v_1.zero_()
+    state.u_2.zero_()
+    state.v_2.zero_()
+    state.coeff_1.zero_()
+    state.coeff_2.zero_()
+    state.bias_1.zero_()
+    state.bias_2.fill_(-100)
+    state.bias_2[:, 3] = 100
+    state.bias_2[:, npd.ATTACK_OUTPUT_INDEX] = -100
+
+    actions = state.step(movement='snapshot_combat', compact_dead=False, sync_positions=False)
+
+    assert int(actions[0].item()) == 3
+    assert int(state.flat_positions[0].item()) == int(food_flat.item())
+    assert state.health[0].item() == pytest.approx(10 - npd.MOVEMENT_HEALTH_COST + npd.FOOD_HEALTH_REWARD)
+    assert int(state.food_grid.reshape(-1)[food_flat].item()) == 0
+    assert int(state.grid.reshape(-1)[food_flat].item()) == 1
 
 
 def test_tensor_rank1_benchmark_refills_empty_board_on_cpu():

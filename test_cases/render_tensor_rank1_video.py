@@ -73,7 +73,7 @@ def selected_rounds(render_rounds, round_stride):
     return [round_index * round_stride for round_index in range(render_rounds)]
 
 
-def tensor_status_text(health, family_index, rounds, countdown, global_frame):
+def tensor_status_text(health, family_index, food_grid, rounds, countdown, global_frame):
     active_health = health[health > 0]
     if active_health.size:
         avghealth = round(float(active_health.mean()))
@@ -86,14 +86,19 @@ def tensor_status_text(health, family_index, rounds, countdown, global_frame):
     return (
         f'Frame {global_frame}  AVG HP {avghealth}  MAX HP {maxhealth}  '
         f'Cells {active_health.size}  unique base genomes: {unique_base_genomes}  '
-        f'Rounds {rounds}  Countdown {countdown}'
+        f'Food {int(food_grid.sum())}  Rounds {rounds}  Countdown {countdown}'
     )
 
 
-def render_tensor_frame(index_grid, health, family_index, size, rounds, countdown, global_frame, cell_size, status_height, font):
+def render_tensor_frame(index_grid, health, family_index, food_grid, size, rounds, countdown, global_frame, cell_size, status_height, font):
     visible = index_grid[2:size.lines, 2:size.columns + 2]
+    visible_food = food_grid[2:size.lines, 2:size.columns + 2]
     rows, cols = visible.shape
     cells = np.full((rows, cols, 3), (8, 10, 14), dtype=np.uint8)
+
+    food = visible_food > 0
+    if np.any(food):
+        cells[food] = (224, 190, 72)
 
     active = visible >= 0
     if np.any(active):
@@ -112,7 +117,7 @@ def render_tensor_frame(index_grid, health, family_index, size, rounds, countdow
     draw.rectangle((0, status_y, cols * cell_size, rows * cell_size + status_height), fill=(14, 18, 24))
     draw.text(
         (6, status_y + 9),
-        tensor_status_text(health, family_index, rounds, countdown, global_frame),
+        tensor_status_text(health, family_index, food_grid, rounds, countdown, global_frame),
         fill=(232, 238, 246),
         font=font,
     )
@@ -243,6 +248,7 @@ class TensorRank1VideoRun:
         self.invalidate_active_count()
         wave_size = max(npd.PER_WAVE - self.active_cell_count(), npd.MIN_WAVE)
         self.spawn_wave(wave_size)
+        self.state.spawn_fixed_food()
         self.countdown = npd.ROUNDTIME
         self.rounds += 1
 
@@ -264,6 +270,7 @@ class TensorRank1VideoRun:
             self.state.index_grid.detach().cpu().numpy(),
             self.state.health.detach().cpu().numpy(),
             self.state.family_index.detach().cpu().numpy(),
+            self.state.food_grid.detach().cpu().numpy(),
         )
 
     def render_round(self, writer, font):
@@ -272,11 +279,12 @@ class TensorRank1VideoRun:
             if self.round_should_end_early():
                 self.end_round_early()
                 break
-            index_grid, health, family_index = self.snapshot()
+            index_grid, health, family_index, food_grid = self.snapshot()
             writer.append_data(render_tensor_frame(
                 index_grid,
                 health,
                 family_index,
+                food_grid,
                 self.size,
                 self.rounds,
                 self.countdown,
@@ -304,6 +312,9 @@ class TensorRank1VideoRun:
             'empty_refills': self.empty_refills,
             'early_ended_rounds': self.early_ended_rounds,
             'family_capacity_final': self.state.families,
+            'food_per_round': int(npd.FOOD_PER_ROUND),
+            'food_health_reward': float(npd.FOOD_HEALTH_REWARD),
+            'food_remaining_final': int(self.state.food_grid.sum().item()),
             'frames_written': frames_written,
             'full_simulation_frames': self.frame,
             'output': str(output),
@@ -368,6 +379,9 @@ def write_manifest(path, args, metrics):
         f'tensor_compile_mode: {args.tensor_compile_mode}',
         f'tensor_matmul_precision: {args.tensor_matmul_precision}',
         f'fitness_update_lr: {npd.FITNESS_UPDATE_LR}',
+        f'food_per_round: {metrics["food_per_round"]}',
+        f'food_health_reward: {metrics["food_health_reward"]}',
+        f'food_remaining_final: {metrics["food_remaining_final"]}',
         f'cuda_graph_captures: {metrics["cuda_graph_captures"]}',
         f'family_capacity_final: {metrics["family_capacity_final"]}',
         f'active_cells_final: {metrics["active_cells_final"]}',
