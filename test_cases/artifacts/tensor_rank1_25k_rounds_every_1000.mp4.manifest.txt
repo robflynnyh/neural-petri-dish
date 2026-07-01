@@ -1,0 +1,30 @@
+Neural Petri Dish tensor rank-1 long-run video artifact
+
+output: test_cases/artifacts/tensor_rank1_25k_rounds_every_1000.mp4
+elapsed_seconds: 2256.471588
+rounds_requested: 25000
+rounds_completed: 25000
+render_rounds: 25
+round_stride: 1000
+rendered_rounds: 0,1000,2000,3000,4000,5000,6000,7000,8000,9000,10000,11000,12000,13000,14000,15000,16000,17000,18000,19000,20000,21000,22000,23000,24000
+frames_written: 12500
+full_simulation_frames: 12500000
+fps: 24
+size: 60x80
+initial_cells: 2500
+seed: 7
+action_device: cuda
+cuda_name: NVIDIA RTX A4500
+tensor_block_steps: 10
+tensor_family_capacity: 10
+tensor_health_dtype: float32
+tensor_coeff_scale: 0.3
+tensor_stationary_health_cap: 1
+tensor_compile_mode: default
+tensor_matmul_precision: high
+cuda_graph_captures: 0
+family_capacity_final: 10
+active_cells_final: 300
+waves_spawned: 7512960
+final_state: test_cases/artifacts/tensor_rank1_25k_rounds_every_1000_final_state.pt
+empty_refills: 52
