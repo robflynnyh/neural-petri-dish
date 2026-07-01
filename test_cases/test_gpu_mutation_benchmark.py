@@ -700,6 +700,57 @@ def test_snapshot_combat_kill_moves_attacker_and_rewards_health_cpu():
     assert int(state.index_grid.reshape(-1)[state.flat_positions[0]].item()) == 0
 
 
+def test_snapshot_combat_lone_target_takes_extra_damage_cpu():
+    state = TensorRank1State.random(
+        cells=2,
+        height=8,
+        width=8,
+        families=1,
+        device=torch.device('cpu'),
+        initial_health=2,
+    )
+    state.positions = torch.tensor([[3, 3], [3, 4]], dtype=torch.long)
+    state.flat_positions = state.positions[:, 0] * state.grid_stride + state.positions[:, 1]
+    state.health = torch.tensor([2, 2], dtype=state.health.dtype)
+    state.stationary_steps.zero_()
+    state.rebuild_grids()
+
+    state.apply_snapshot_combat(
+        torch.tensor([3, 0], dtype=torch.long),
+        compact_dead=False,
+        sync_positions=False,
+    )
+
+    assert state.health.tolist() == [4, 0]
+    assert int(state.flat_positions[0].item()) == 3 * state.grid_stride + 4
+
+
+def test_snapshot_combat_protected_target_avoids_extra_damage_cpu():
+    state = TensorRank1State.random(
+        cells=3,
+        height=8,
+        width=8,
+        families=1,
+        device=torch.device('cpu'),
+        initial_health=2,
+    )
+    state.positions = torch.tensor([[3, 3], [3, 4], [4, 4]], dtype=torch.long)
+    state.flat_positions = state.positions[:, 0] * state.grid_stride + state.positions[:, 1]
+    state.health = torch.tensor([3, 2, 2], dtype=state.health.dtype)
+    state.stationary_steps.zero_()
+    state.rebuild_grids()
+
+    state.apply_snapshot_combat(
+        torch.tensor([3, 0, 0], dtype=torch.long),
+        compact_dead=False,
+        sync_positions=False,
+    )
+
+    assert state.health.tolist() == [2, 1, 2]
+    assert int(state.flat_positions[0].item()) == 3 * state.grid_stride + 3
+    assert_tensor_state_position_invariants(state)
+
+
 def test_snapshot_combat_collision_losers_do_not_stay_alive_cpu():
     state = TensorRank1State.random(
         cells=3,

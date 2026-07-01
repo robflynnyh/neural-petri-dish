@@ -11,7 +11,15 @@ import torch
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 import neural_petri_dish as npd
-from tensor_rank1_sim import KILL_REWARD, MAX_HEALTH, TensorRank1State, resolve_device, resolve_health_dtype, synchronize
+from tensor_rank1_sim import (
+    KILL_REWARD,
+    MAX_HEALTH,
+    TensorRank1State,
+    resolve_device,
+    resolve_health_dtype,
+    snapshot_attack_damage,
+    synchronize,
+)
 
 
 def positive_int(value):
@@ -84,8 +92,16 @@ def action_counts(state, actions):
     hits_occupied = moving & (target_indices >= 0)
 
     valid_targets = target_indices.clamp_min(0).to(torch.long)
+    attack_damage = snapshot_attack_damage(
+        hits_occupied,
+        target_flat_positions,
+        state.index_grid_indices(),
+        state.index_grid.reshape(-1),
+        state.direction_flat_deltas,
+        health.dtype,
+    )
     damage_received = torch.zeros_like(health)
-    damage_received.scatter_add_(0, valid_targets, hits_occupied.to(health.dtype))
+    damage_received.scatter_add_(0, valid_targets, attack_damage * hits_occupied.to(health.dtype))
     target_health_after = health[valid_targets] - damage_received[valid_targets]
     target_survives = hits_occupied & (target_health_after > 0)
     target_killed = hits_occupied & (target_health_after <= 0)

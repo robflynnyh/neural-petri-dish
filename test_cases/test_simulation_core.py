@@ -135,6 +135,27 @@ def test_unsuccessful_attack_damages_attacker_and_victim():
     game = npd.Game(size=(8, 8))
     game.add_cell(4, 4)
     game.add_cell(4, 5)
+    game.add_cell(5, 5)
+    attacker = game.get_cell(4, 4)
+    victim = game.get_cell(4, 5)
+    protector = game.get_cell(5, 5)
+    force_action(attacker, 3)
+    force_action(victim, 0)
+    force_action(protector, 0)
+
+    npd.step(game)
+
+    assert len(game.cells) == 3
+    assert attacker.health == 1
+    assert victim.health == 1
+    assert protector.health == 2
+    assert positions(game) == [(4, 4), (4, 5), (5, 5)]
+
+
+def test_lone_target_takes_extra_attack_damage():
+    game = npd.Game(size=(8, 8))
+    game.add_cell(4, 4)
+    game.add_cell(4, 5)
     attacker = game.get_cell(4, 4)
     victim = game.get_cell(4, 5)
     force_action(attacker, 3)
@@ -142,10 +163,9 @@ def test_unsuccessful_attack_damages_attacker_and_victim():
 
     npd.step(game)
 
-    assert len(game.cells) == 2
-    assert attacker.health == 1
-    assert victim.health == 1
-    assert positions(game) == [(4, 4), (4, 5)]
+    assert victim not in game.cells
+    assert attacker in game.cells
+    assert attacker.pos == [4, 5]
 
 
 def test_mutation_uses_actual_neighbor_positions(monkeypatch):

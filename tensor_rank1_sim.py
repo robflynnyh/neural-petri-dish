@@ -13,6 +13,8 @@ GRID_DTYPE = torch.int8
 INDEX_GRID_DTYPE = torch.int32
 MAX_HEALTH = 15
 KILL_REWARD = 2
+BASE_ATTACK_DAMAGE = 1
+LONE_TARGET_DAMAGE_BONUS = 1
 _COMPILED_SNAPSHOT_COMBAT_STEP = {}
 _COMPILED_REBUILD_SNAPSHOT_COMBAT_STEP = {}
 _COMPILED_FAMILY_BASIS_REBUILD_SNAPSHOT_COMBAT_STEP = {}
@@ -108,6 +110,18 @@ def stabilize_logits(logits):
     return logits.clamp_(-LOGIT_LIMIT, LOGIT_LIMIT)
 
 
+def snapshot_attack_damage(hits_occupied, target_flat_positions, attacker_indices, index_flat, direction_flat_deltas, dtype):
+    has_other_neighbor = torch.zeros_like(hits_occupied)
+    for offset_index in range(1, 9):
+        neighbor_values = index_flat[target_flat_positions + direction_flat_deltas[offset_index]]
+        has_other_neighbor = has_other_neighbor | ((neighbor_values >= 0) & (neighbor_values != attacker_indices))
+    lone_target = hits_occupied & ~has_other_neighbor
+    return (
+        torch.full(hits_occupied.shape, BASE_ATTACK_DAMAGE, device=hits_occupied.device, dtype=dtype)
+        + lone_target.to(dtype) * LONE_TARGET_DAMAGE_BONUS
+    )
+
+
 def snapshot_combat_step_tensors(
         grid,
         index_grid,
@@ -157,8 +171,17 @@ def snapshot_combat_step_tensors(
     hits_occupied = moving & (target_indices >= 0)
 
     valid_targets = target_indices.clamp_min(0).to(torch.long)
+    attacker_indices = torch.arange(flat_positions.shape[0], device=grid.device, dtype=index_grid.dtype)
+    attack_damage = snapshot_attack_damage(
+        hits_occupied,
+        target_flat_positions,
+        attacker_indices,
+        index_grid.reshape(-1),
+        direction_flat_deltas,
+        health.dtype,
+    )
     damage_received = torch.zeros_like(health)
-    damage_received.scatter_add_(0, valid_targets, hits_occupied.to(health.dtype))
+    damage_received.scatter_add_(0, valid_targets, attack_damage * hits_occupied.to(health.dtype))
 
     target_health_after = health[valid_targets] - damage_received[valid_targets]
     target_survives = hits_occupied & (target_health_after > 0)
@@ -173,7 +196,7 @@ def snapshot_combat_step_tensors(
     index_flat = index_grid.reshape(-1)
     grid_flat[old_flat_positions] = 0
     index_flat[old_flat_positions] = -1
-    indices = torch.arange(flat_positions.shape[0], device=grid.device, dtype=index_grid.dtype)
+    indices = attacker_indices
     write_indices = torch.where(alive, indices, torch.full_like(indices, -1))
     index_flat.scatter_reduce_(
         0,
@@ -236,8 +259,17 @@ def snapshot_combat_step_tensors_rebuild_grid(
     hits_occupied = moving & (target_indices >= 0)
 
     valid_targets = target_indices.clamp_min(0).to(torch.long)
+    attacker_indices = torch.arange(flat_positions.shape[0], device=grid.device, dtype=index_grid.dtype)
+    attack_damage = snapshot_attack_damage(
+        hits_occupied,
+        target_flat_positions,
+        attacker_indices,
+        index_grid.reshape(-1),
+        direction_flat_deltas,
+        health.dtype,
+    )
     damage_received = torch.zeros_like(health)
-    damage_received.scatter_add_(0, valid_targets, hits_occupied.to(health.dtype))
+    damage_received.scatter_add_(0, valid_targets, attack_damage * hits_occupied.to(health.dtype))
 
     target_health_after = health[valid_targets] - damage_received[valid_targets]
     target_survives = hits_occupied & (target_health_after > 0)
@@ -252,7 +284,7 @@ def snapshot_combat_step_tensors_rebuild_grid(
     grid[2:-2, 2:-2].zero_()
     index_flat = index_grid.reshape(-1)
     grid_flat = grid.reshape(-1)
-    indices = torch.arange(flat_positions.shape[0], device=grid.device, dtype=index_grid.dtype)
+    indices = attacker_indices
     write_indices = torch.where(alive, indices, torch.full_like(indices, -1))
     index_flat.scatter_reduce_(
         0,
@@ -328,8 +360,16 @@ def snapshot_combat_step_tensors_family_basis_rebuild_grid(
     hits_occupied = moving & (target_indices >= 0)
 
     valid_targets = target_indices.clamp_min(0).to(torch.long)
+    attack_damage = snapshot_attack_damage(
+        hits_occupied,
+        target_flat_positions,
+        scatter_indices,
+        index_flat,
+        direction_flat_deltas,
+        health.dtype,
+    )
     damage_received = torch.zeros_like(health)
-    damage_received.scatter_add_(0, valid_targets, hits_occupied.to(health.dtype))
+    damage_received.scatter_add_(0, valid_targets, attack_damage * hits_occupied.to(health.dtype))
 
     target_health_after = health[valid_targets] - damage_received[valid_targets]
     target_survives = hits_occupied & (target_health_after > 0)
@@ -1062,9 +1102,18 @@ class TensorRank1State:
         hits_empty = moving & (target_indices == -1)
         hits_occupied = moving & (target_indices >= 0)
         valid_targets = target_indices.clamp_min(0).to(torch.long)
+        attacker_indices = self.index_grid_indices()
+        attack_damage = snapshot_attack_damage(
+            hits_occupied,
+            target_flat_positions,
+            attacker_indices,
+            self.index_grid.reshape(-1),
+            self.direction_flat_deltas,
+            self.health.dtype,
+        )
         damage_received = self.damage_buffer()
         damage_received.zero_()
-        damage_received.scatter_add_(0, valid_targets, hits_occupied.to(self.health.dtype))
+        damage_received.scatter_add_(0, valid_targets, attack_damage * hits_occupied.to(self.health.dtype))
 
         target_health_after = self.health[valid_targets] - damage_received[valid_targets]
         target_survives = hits_occupied & (target_health_after > 0)

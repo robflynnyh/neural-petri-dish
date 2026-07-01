@@ -124,6 +124,8 @@ DIRECTION_DELTAS = (
     (1, 1),   # down right
     (1, -1),  # down left
 )
+BASE_ATTACK_DAMAGE = 1
+LONE_TARGET_DAMAGE_BONUS = 1
 NEIGHBOR_OFFSETS = np.array(
     [(dy, dx) for dy in range(-2, 3) for dx in range(-2, 3) if not (dy == 0 and dx == 0)],
     dtype=np.int64,
@@ -140,6 +142,23 @@ direction_dict = {
     7: lambda yx: np.array([yx[0]+1, yx[1]+1]), # down right
     8: lambda yx: np.array([yx[0]+1, yx[1]-1]) # down left
 }
+
+
+def target_has_other_immediate_neighbors(game, target_y, target_x, attacker):
+    index = game.cells_by_pos
+    stride = game._cell_key_stride
+    for dy, dx in DIRECTION_DELTAS[1:]:
+        neighbor = index.get((target_y + dy) * stride + target_x + dx)
+        if neighbor is not None and neighbor is not attacker:
+            return True
+    return False
+
+
+def attack_damage_for_target(game, target_y, target_x, attacker):
+    damage = BASE_ATTACK_DAMAGE
+    if not target_has_other_immediate_neighbors(game, target_y, target_x, attacker):
+        damage += LONE_TARGET_DAMAGE_BONUS
+    return damage
 
 class Cell:
     '''
@@ -861,7 +880,7 @@ def step_sequential(game):
                                 grid[new_y, new_x] = 0
                             continue
 
-                        ncell.health -= 1
+                        ncell.health -= attack_damage_for_target(game, new_y, new_x, cell)
                         success = ncell.health <= 0
                         if success:
                             grid[new_y, new_x] = 0
@@ -962,7 +981,7 @@ def step(game):
                                 grid[new_y, new_x] = 0
                             continue
                         ###
-                        ncell.health -= 1
+                        ncell.health -= attack_damage_for_target(game, new_y, new_x, cell)
                         sucess = ncell.health <= 0
                         if sucess:
                             grid[new_y, new_x] = 0
