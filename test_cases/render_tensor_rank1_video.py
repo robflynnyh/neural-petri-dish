@@ -234,6 +234,7 @@ class TensorRank1VideoRun:
         else:
             for _ in range(step_count):
                 self.state.step(movement='snapshot_combat', compact_dead=False, sync_positions=False)
+        self.state.record_survival_steps(step_count)
         self.invalidate_active_count()
 
     def finish_round_if_needed(self):
@@ -367,6 +368,7 @@ def write_manifest(path, args, metrics):
         f'tensor_stationary_health_cap: {args.tensor_stationary_health_cap}',
         f'tensor_compile_mode: {args.tensor_compile_mode}',
         f'tensor_matmul_precision: {args.tensor_matmul_precision}',
+        f'fitness_update_lr: {npd.FITNESS_UPDATE_LR}',
         f'cuda_graph_captures: {metrics["cuda_graph_captures"]}',
         f'family_capacity_final: {metrics["family_capacity_final"]}',
         f'active_cells_final: {metrics["active_cells_final"]}',

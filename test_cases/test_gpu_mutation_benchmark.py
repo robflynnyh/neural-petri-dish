@@ -941,7 +941,7 @@ def test_tensor_rank1_compaction_prunes_unused_families_without_changing_survivo
     assert_tensor_state_position_invariants(state)
 
 
-def test_tensor_rank1_state_weighted_wave_uses_hp_weighted_survivors():
+def test_tensor_rank1_state_weighted_wave_uses_standardized_survival_update():
     torch.manual_seed(123)
     state = TensorRank1State.random(
         cells=8,
@@ -952,12 +952,22 @@ def test_tensor_rank1_state_weighted_wave_uses_hp_weighted_survivors():
     )
     old_cells = state.cells
     old_families = state.families
-    state.health = torch.arange(1, old_cells + 1, dtype=torch.long)
-    weights = state.health.to(torch.float32)
-    weights = weights / weights.sum()
-    expected_weight_1 = (state.dense_weight_1() * weights.reshape(-1, 1, 1)).sum(dim=0)
-    expected_weight_2 = (state.dense_weight_2() * weights.reshape(-1, 1, 1)).sum(dim=0)
-    expected_bias_1 = (state.bias_1 * weights.reshape(-1, 1)).sum(dim=0)
+    state.round_survival_steps = torch.linspace(0, 500, old_cells)
+    state.round_participants = torch.ones(old_cells, dtype=torch.bool)
+    fitness = state.round_survival_steps / 500.0
+    advantage = (fitness - fitness.mean()) / fitness.std(unbiased=False)
+    expected_weight_1 = state.evolution_anchor_weight_1 + 0.05 * (
+        advantage.reshape(-1, 1, 1)
+        * (state.dense_weight_1() - state.evolution_anchor_weight_1.unsqueeze(0))
+    ).mean(dim=0)
+    expected_weight_2 = state.evolution_anchor_weight_2 + 0.05 * (
+        advantage.reshape(-1, 1, 1)
+        * (state.dense_weight_2() - state.evolution_anchor_weight_2.unsqueeze(0))
+    ).mean(dim=0)
+    expected_bias_1 = state.evolution_anchor_bias_1 + 0.05 * (
+        advantage.reshape(-1, 1)
+        * (state.bias_1 - state.evolution_anchor_bias_1.unsqueeze(0))
+    ).mean(dim=0)
     old_family_index = state.family_index.clone()
 
     spawned = state.append_weighted_wave(5, initial_health=7)

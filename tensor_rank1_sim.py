@@ -618,6 +618,12 @@ class TensorRank1State:
     neighbor_flat_offsets: torch.Tensor
     direction_deltas: torch.Tensor
     direction_flat_deltas: torch.Tensor
+    round_survival_steps: torch.Tensor = None
+    round_participants: torch.Tensor = None
+    evolution_anchor_weight_1: torch.Tensor = None
+    evolution_anchor_bias_1: torch.Tensor = None
+    evolution_anchor_weight_2: torch.Tensor = None
+    evolution_anchor_bias_2: torch.Tensor = None
     single_active_family_id: int = None
 
     @classmethod
@@ -705,6 +711,12 @@ class TensorRank1State:
                 device=device,
                 dtype=torch.long,
             ),
+            round_survival_steps=torch.zeros(cells, device=device, dtype=torch.float32),
+            round_participants=torch.ones(cells, device=device, dtype=torch.bool),
+            evolution_anchor_weight_1=base_weight_1[0].clone(),
+            evolution_anchor_bias_1=family_bias_1[0].clone(),
+            evolution_anchor_weight_2=base_weight_2[0].clone(),
+            evolution_anchor_bias_2=family_bias_2[0].clone(),
             single_active_family_id=0 if families == 1 else None,
         )
 
@@ -752,6 +764,8 @@ class TensorRank1State:
         if active_cells < capacity:
             inactive = torch.arange(active_cells, capacity, device=state.device)
             state.health[inactive] = 0
+            state.round_participants[inactive] = False
+            state.round_survival_steps[inactive] = 0
             state.family_index[inactive] = 0
             grid_flat = state.grid.reshape(-1)
             index_flat = state.index_grid.reshape(-1)
@@ -993,6 +1007,28 @@ class TensorRank1State:
 
     def live_family_count(self):
         return int(self.live_family_mask().sum().item())
+
+    def ensure_evolution_buffers(self):
+        if self.round_survival_steps is None or self.round_survival_steps.shape[0] != self.cells:
+            self.round_survival_steps = torch.zeros(self.cells, device=self.device, dtype=torch.float32)
+        if self.round_participants is None or self.round_participants.shape[0] != self.cells:
+            self.round_participants = self.health > 0
+        if self.evolution_anchor_weight_1 is None:
+            self.evolution_anchor_weight_1 = self.base_weight_1[0].clone()
+            self.evolution_anchor_bias_1 = self.bias_1[0].clone()
+            self.evolution_anchor_weight_2 = self.base_weight_2[0].clone()
+            self.evolution_anchor_bias_2 = self.bias_2[0].clone()
+
+    def record_survival_steps(self, step_count):
+        self.ensure_evolution_buffers()
+        alive = self.health > 0
+        self.round_participants |= alive
+        self.round_survival_steps[alive] += float(step_count)
+
+    def reset_round_survival_tracking(self):
+        self.ensure_evolution_buffers()
+        self.round_survival_steps.zero_()
+        self.round_participants.copy_(self.health > 0)
 
     def next_static_family_slot(self, family_count):
         family_count = int(family_count)
@@ -1238,7 +1274,9 @@ class TensorRank1State:
         return selected_base + self.coeff_2.reshape(-1, 1, 1) * selected_direction
 
     def weighted_survivor_family(self):
-        if self.cells == 0 or bool(self.health.clamp_min(0).sum() <= 0):
+        self.ensure_evolution_buffers()
+        participants = self.round_participants
+        if self.cells == 0 or not bool(participants.any()):
             base_weight_1, base_bias_1 = init_linear_weight_bias(HIDDEN_DIM, INPUT_DIM, 1, self.device)
             base_weight_2, base_bias_2 = init_linear_weight_bias(OUTPUT_DIM, HIDDEN_DIM, 1, self.device)
             base_weight_1 = base_weight_1[0]
@@ -1246,27 +1284,46 @@ class TensorRank1State:
             base_bias_1 = base_bias_1[0]
             base_bias_2 = base_bias_2[0]
         else:
-            weights = self.health.clamp_min(0).to(torch.float32)
-            weights = weights / weights.sum().clamp_min(torch.finfo(weights.dtype).eps)
-            family_weight = torch.zeros(self.families, device=self.device, dtype=torch.float32)
-            family_weight.scatter_add_(0, self.family_index, weights)
-            rank_scale_1 = torch.zeros(self.families, device=self.device, dtype=torch.float32)
-            rank_scale_2 = torch.zeros(self.families, device=self.device, dtype=torch.float32)
-            rank_scale_1.scatter_add_(0, self.family_index, weights * self.coeff_1)
-            rank_scale_2.scatter_add_(0, self.family_index, weights * self.coeff_2)
+            fitness = (self.round_survival_steps[participants] / float(npd.ROUNDTIME)).clamp(0.0, 1.0)
+            centered = fitness - fitness.mean()
+            std = fitness.std(unbiased=False)
+            if bool(std <= 1.0e-6):
+                base_weight_1 = self.evolution_anchor_weight_1.clone()
+                base_bias_1 = self.evolution_anchor_bias_1.clone()
+                base_weight_2 = self.evolution_anchor_weight_2.clone()
+                base_bias_2 = self.evolution_anchor_bias_2.clone()
+            else:
+                advantage = centered / std.clamp_min(1.0e-6)
+                weight_1 = self.dense_weight_1()[participants]
+                weight_2 = self.dense_weight_2()[participants]
+                bias_1 = self.bias_1[participants]
+                bias_2 = self.bias_2[participants]
+                update_weight_1 = (
+                    advantage.reshape(-1, 1, 1)
+                    * (weight_1 - self.evolution_anchor_weight_1.unsqueeze(0))
+                ).mean(dim=0)
+                update_weight_2 = (
+                    advantage.reshape(-1, 1, 1)
+                    * (weight_2 - self.evolution_anchor_weight_2.unsqueeze(0))
+                ).mean(dim=0)
+                update_bias_1 = (
+                    advantage.reshape(-1, 1)
+                    * (bias_1 - self.evolution_anchor_bias_1.unsqueeze(0))
+                ).mean(dim=0)
+                update_bias_2 = (
+                    advantage.reshape(-1, 1)
+                    * (bias_2 - self.evolution_anchor_bias_2.unsqueeze(0))
+                ).mean(dim=0)
+                lr = float(npd.FITNESS_UPDATE_LR)
+                base_weight_1 = self.evolution_anchor_weight_1 + lr * update_weight_1
+                base_weight_2 = self.evolution_anchor_weight_2 + lr * update_weight_2
+                base_bias_1 = self.evolution_anchor_bias_1 + lr * update_bias_1
+                base_bias_2 = self.evolution_anchor_bias_2 + lr * update_bias_2
 
-            direction_1 = self.u_1.unsqueeze(2) * self.v_1.unsqueeze(1)
-            direction_2 = self.u_2.unsqueeze(2) * self.v_2.unsqueeze(1)
-            base_weight_1 = (
-                self.base_weight_1 * family_weight.reshape(-1, 1, 1)
-                + direction_1 * rank_scale_1.reshape(-1, 1, 1)
-            ).sum(dim=0)
-            base_weight_2 = (
-                self.base_weight_2 * family_weight.reshape(-1, 1, 1)
-                + direction_2 * rank_scale_2.reshape(-1, 1, 1)
-            ).sum(dim=0)
-            base_bias_1 = (self.bias_1 * weights.reshape(-1, 1)).sum(dim=0)
-            base_bias_2 = (self.bias_2 * weights.reshape(-1, 1)).sum(dim=0)
+        self.evolution_anchor_weight_1 = base_weight_1.clone()
+        self.evolution_anchor_bias_1 = base_bias_1.clone()
+        self.evolution_anchor_weight_2 = base_weight_2.clone()
+        self.evolution_anchor_bias_2 = base_bias_2.clone()
 
         u_1 = torch.randn(HIDDEN_DIM, device=self.device)
         v_1 = torch.randn(INPUT_DIM, device=self.device)
@@ -1372,6 +1429,7 @@ class TensorRank1State:
         index_flat = self.index_grid.reshape(-1)
         grid_flat[new_flat_positions] = 1
         index_flat[new_flat_positions] = new_indices
+        self.reset_round_survival_tracking()
         return spawn_count
 
     def append_static_weighted_wave(
@@ -1433,6 +1491,7 @@ class TensorRank1State:
         grid_flat[new_flat_positions] = 1
         index_flat[new_flat_positions] = slots.to(self.index_grid.dtype)
         self.single_active_family_id = None
+        self.reset_round_survival_tracking()
         return spawn_count, family_count
 
     def compact(self, alive):
@@ -1443,6 +1502,10 @@ class TensorRank1State:
         self.positions = self.positions[alive]
         self.flat_positions = self.flat_positions[alive]
         self.health = self.health[alive]
+        if self.round_survival_steps is not None and self.round_survival_steps.shape[0] == alive.shape[0]:
+            self.round_survival_steps = self.round_survival_steps[alive]
+        if self.round_participants is not None and self.round_participants.shape[0] == alive.shape[0]:
+            self.round_participants = self.round_participants[alive]
         self.stationary_steps = self.stationary_steps[alive]
         self.recurrent_state = self.recurrent_state[alive]
         self.family_index = self.family_index[alive]
@@ -1873,6 +1936,7 @@ def benchmark_tensor_state(
                     compact_dead=(compact_every == 1),
                     sync_positions=sync_positions_each_step,
                 )
+            state.record_survival_steps(step_count)
             invalidate_active_cell_count()
             if checksum_tensor is not None:
                 checksum_tensor = checksum_tensor + actions[:checksum_actions].sum()
@@ -1966,6 +2030,7 @@ def benchmark_tensor_state(
         'active_families_final': active_family_count if static_capacity else state.families,
         'family_capacity': family_capacity,
         'family_basis_step': family_basis_step,
+        'fitness_update_lr': npd.FITNESS_UPDATE_LR,
         'height': height,
         'health_dtype': health_dtype_name,
         'initial_health': initial_health,
