@@ -236,6 +236,8 @@ class TensorRank1VideoRun:
     def finish_round_if_needed(self):
         if self.countdown != 0:
             return
+        self.state.apply_round_transition_health_cost()
+        self.invalidate_active_count()
         wave_size = max(npd.PER_WAVE - self.active_cell_count(), npd.MIN_WAVE)
         self.spawn_wave(wave_size)
         self.countdown = npd.ROUNDTIME

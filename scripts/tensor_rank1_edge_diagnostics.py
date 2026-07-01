@@ -187,6 +187,7 @@ def run_case(args, coeff_scale):
             counts['total_deaths'] = counts.get('total_deaths', 0) + count_tensor(died)
 
             if (step_index + 1) % npd.ROUNDTIME == 0:
+                state.apply_round_transition_health_cost()
                 active_cells = int((state.health > 0).sum().item())
                 wave_size = max(npd.PER_WAVE - active_cells, npd.MIN_WAVE)
                 spawned, active_family_count = state.append_static_weighted_wave(

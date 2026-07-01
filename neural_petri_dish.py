@@ -389,6 +389,13 @@ class Game():
             return True
         return False
 
+    def apply_round_transition_health_cost(self):
+        for cell in list(self.cells):
+            self.damage_cell(cell)
+        if self.cells_removed_this_step:
+            self.compact_cells()
+            self.cells_removed_this_step = False
+
     def add_cell(self, y, x, genes=None):
         if self.grid[y][x] != 0:
             raise Exception('Cannot Add Cell to a Non-Empty Position')
@@ -640,6 +647,7 @@ def write_tensor_snapshot(index_grid, health, size, rounds, countdown, frame, sn
 
 def advance_round(game, countdown):
     if countdown == 0:
+        game.apply_round_transition_health_cost()
         totalcells = len(game.cells)
         maxage = max([c.age for c in game.cells]) if game.cells else 0
         game = init(game, num=max(PER_WAVE - totalcells, MIN_WAVE))
@@ -1196,6 +1204,8 @@ def main_tensor_rank1(args):
             countdown -= step_count
             frame += step_count
             if countdown == 0:
+                state.apply_round_transition_health_cost()
+                invalidate_active_count()
                 spawned = spawn_wave(max(PER_WAVE - active_cell_count(), MIN_WAVE))
                 waves_spawned += spawned
                 countdown = ROUNDTIME

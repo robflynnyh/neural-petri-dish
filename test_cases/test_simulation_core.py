@@ -349,6 +349,23 @@ def test_shared_rank1_base_updates_from_hp_weighted_survivors():
     assert torch.allclose(family.base_weight_2, torch.full_like(first.linear2.weight, 10.0))
 
 
+def test_round_transition_costs_survivor_health_before_wave_spawn():
+    game = npd.Game(size=(6, 6), mutation_mode=npd.MUTATION_MODE_SHARED_RANK1_FACTORED)
+    game.add_cell(2, 2)
+    game.add_cell(2, 3)
+    first, second = game.cells
+    first.health = 1
+    second.health = 3
+
+    game, countdown = npd.advance_round(game, 0)
+
+    assert countdown == npd.ROUNDTIME
+    assert game.rounds == 1
+    assert first not in game.cells
+    assert second in game.cells
+    assert second.health == 2
+
+
 def test_batched_shared_rank1_actions_match_materialized_networks():
     npd.seed_all(11)
     game = npd.Game(

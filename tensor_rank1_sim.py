@@ -873,6 +873,22 @@ class TensorRank1State:
     def alive_mask(self):
         return self.health > 0
 
+    def apply_round_transition_health_cost(self, compact_dead=False):
+        alive = self.health > 0
+        if not bool(alive.any()):
+            return
+        self.health = torch.where(alive, self.health - 1, self.health)
+        self.stationary_steps = torch.where(
+            self.health > 0,
+            self.stationary_steps,
+            torch.zeros_like(self.stationary_steps),
+        )
+        alive_after = self.health > 0
+        if compact_dead:
+            self.compact(alive_after)
+        else:
+            self.update_grids_incremental(self.flat_positions, alive=alive_after)
+
     def live_family_mask(self):
         used = torch.zeros(self.families, device=self.device, dtype=torch.bool)
         alive = self.alive_mask()
@@ -1757,6 +1773,8 @@ def benchmark_tensor_state(
                 state.compact(state.alive_mask())
                 compacted_this_step = True
             if wave_every > 0 and _step % wave_every == 0:
+                state.apply_round_transition_health_cost(compact_dead=(not static_capacity and compact_every == 1))
+                invalidate_active_cell_count()
                 round_wave_size = scheduled_wave_size()
                 if static_capacity:
                     previous_family_version = state.family_capacity_version()

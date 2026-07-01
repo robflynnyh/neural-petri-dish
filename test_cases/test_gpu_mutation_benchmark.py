@@ -936,6 +936,27 @@ def test_tensor_rank1_static_wave_grows_when_all_family_slots_are_live_cpu():
     assert_tensor_state_position_invariants(state)
 
 
+def test_tensor_rank1_round_transition_health_cost_updates_grid_cpu():
+    torch.manual_seed(123)
+    state = TensorRank1State.random(
+        cells=3,
+        height=8,
+        width=8,
+        families=1,
+        device=torch.device('cpu'),
+        initial_health=3,
+    )
+    state.health = torch.tensor([1, 2, 3], dtype=state.health.dtype)
+    state.rebuild_grids()
+
+    state.apply_round_transition_health_cost()
+
+    assert state.health.tolist() == [0, 1, 2]
+    assert int((state.health > 0).sum().item()) == 2
+    assert int(state.index_grid.reshape(-1)[state.flat_positions[0]].item()) == -1
+    assert_tensor_state_position_invariants(state)
+
+
 def test_tensor_rank1_flat_empty_positions_match_position_view():
     torch.manual_seed(123)
     state = TensorRank1State.random(
@@ -1301,10 +1322,10 @@ def test_tensor_rank1_benchmark_normal_round_refill_uses_live_cell_count_cpu():
         warmup_steps=0,
         movement='none',
         device=torch.device('cpu'),
-        initial_health=100,
+        initial_health=2,
         wave_every=2,
         wave_size=999,
-        wave_initial_health=100,
+        wave_initial_health=2,
         compact_every=2,
         normal_round_refill=True,
         per_wave=5,
@@ -1315,5 +1336,5 @@ def test_tensor_rank1_benchmark_normal_round_refill_uses_live_cell_count_cpu():
     assert metrics['per_wave'] == 5
     assert metrics['min_wave'] == 2
     assert metrics['empty_refills'] == 0
-    assert metrics['waves_spawned'] == 4
-    assert metrics['active_cells_final'] == 8
+    assert metrics['waves_spawned'] == 5
+    assert metrics['active_cells_final'] == 5

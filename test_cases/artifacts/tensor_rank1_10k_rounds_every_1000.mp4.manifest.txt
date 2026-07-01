@@ -1,7 +1,7 @@
 Neural Petri Dish tensor rank-1 long-run video artifact
 
 output: test_cases/artifacts/tensor_rank1_10k_rounds_every_1000.mp4
-elapsed_seconds: 827.468574
+elapsed_seconds: 788.095536
 rounds_requested: 10000
 rounds_completed: 10000
 render_rounds: 10
@@ -23,8 +23,8 @@ tensor_stationary_health_cap: 1
 tensor_compile_mode: default
 tensor_matmul_precision: high
 cuda_graph_captures: 0
-family_capacity_final: 80
-active_cells_final: 1432
-waves_spawned: 2500168
+family_capacity_final: 10
+active_cells_final: 369
+waves_spawned: 2501091
 final_state: test_cases/artifacts/tensor_rank1_10k_rounds_every_1000_final_state.pt
 empty_refills: 0
