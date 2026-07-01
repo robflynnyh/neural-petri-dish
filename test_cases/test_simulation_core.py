@@ -504,6 +504,31 @@ def test_cli_tensor_engine_help_exposes_render_cadence():
     assert '--metrics-json' in result.stdout
 
 
+def test_cli_tensor_engine_rejects_block_steps_that_skip_refill_checks():
+    script = Path(__file__).resolve().parents[1] / 'neural_petri_dish.py'
+    result = subprocess.run(
+        [
+            sys.executable,
+            str(script),
+            '--engine',
+            npd.SIM_ENGINE_TENSOR_RANK1,
+            '--action-device',
+            'cpu',
+            '--max-frames',
+            '1',
+            '--tensor-block-steps',
+            '30',
+            '--no-render',
+        ],
+        capture_output=True,
+        text=True,
+        timeout=20,
+    )
+
+    assert result.returncode == 2
+    assert '--tensor-block-steps must divide --tensor-static-refill-check-every' in result.stderr
+
+
 def test_video_renderer_writes_artifact_and_manifest(tmp_path):
     script = Path(__file__).resolve().parent / 'render_video.py'
     output = tmp_path / 'preview.mp4'

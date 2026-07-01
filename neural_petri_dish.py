@@ -1073,6 +1073,8 @@ def main_tensor_rank1(args):
     empty_refills = 0
     graph_runner = None
     block_steps = max(int(args.tensor_block_steps), 1)
+    if args.tensor_static_refill_check_every % block_steps != 0:
+        raise ValueError('--tensor-block-steps must divide --tensor-static-refill-check-every')
     render_every = args.tensor_render_every if args.tensor_render_every is not None else block_steps
     if device.type == 'cuda':
         compile_state = state.clone()
@@ -1323,7 +1325,7 @@ if __name__ == '__main__':
     parser.add_argument('--metrics-json', help='write bounded-run metrics JSON for benchmark/debug runs')
     parser.add_argument('--no-render', action='store_true', help='do not render frames to the terminal')
     parser.add_argument('--frame-rate', type=float, default=FRAME_RATE, help='seconds to sleep between frames')
-    parser.add_argument('--tensor-block-steps', type=positive_int, default=50)
+    parser.add_argument('--tensor-block-steps', type=positive_int, default=100)
     parser.add_argument('--tensor-render-every', type=positive_int)
     parser.add_argument('--tensor-family-capacity', type=positive_int, default=7)
     parser.add_argument('--tensor-cell-capacity', type=positive_int)
@@ -1335,5 +1337,9 @@ if __name__ == '__main__':
     parser.add_argument('--tensor-matmul-precision', choices=('highest', 'high', 'medium'), default='high')
     parser.add_argument('--no-tensor-cuda-graph', action='store_true')
     args = parser.parse_args()
+    if (
+            args.engine == SIM_ENGINE_TENSOR_RANK1
+            and args.tensor_static_refill_check_every % args.tensor_block_steps != 0):
+        parser.error('--tensor-block-steps must divide --tensor-static-refill-check-every')
 
     main(args)

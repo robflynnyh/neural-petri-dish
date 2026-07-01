@@ -51,7 +51,7 @@ def parse_args():
     parser.add_argument('--health-dtype', choices=tuple(HEALTH_DTYPES), default='int32')
     parser.add_argument('--matmul-precision', choices=MATMUL_PRECISIONS, default='high')
     parser.add_argument('--compile-mode', choices=COMPILE_MODES, default='default')
-    parser.add_argument('--compiled-block-steps', type=positive_int, default=50)
+    parser.add_argument('--compiled-block-steps', type=positive_int, default=100)
     parser.add_argument('--seed', type=int, default=7)
     parser.add_argument('--output-json')
     parser.add_argument(

@@ -44,7 +44,7 @@ def parse_args():
     parser.add_argument('--tensor-health-dtype', choices=tuple(HEALTH_DTYPES), default='int32')
     parser.add_argument('--tensor-matmul-precision', choices=MATMUL_PRECISIONS, default='high')
     parser.add_argument('--tensor-compile-mode', choices=COMPILE_MODES, default='default')
-    parser.add_argument('--tensor-compiled-block-steps', type=positive_int, default=50)
+    parser.add_argument('--tensor-compiled-block-steps', type=positive_int, default=100)
     parser.add_argument('--no-tensor-cuda-graph-block', action='store_true')
     parser.add_argument('--output-json')
     args = parser.parse_args()
