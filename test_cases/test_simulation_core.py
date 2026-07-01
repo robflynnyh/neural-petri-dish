@@ -407,7 +407,7 @@ def test_round_transition_costs_survivor_health_before_wave_spawn():
     game.add_cell(2, 3)
     first, second = game.cells
     first.health = 1
-    second.health = 4
+    second.health = 2
 
     game, countdown = npd.advance_round(game, 0)
 

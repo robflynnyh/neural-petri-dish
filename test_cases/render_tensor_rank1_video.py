@@ -73,21 +73,24 @@ def selected_rounds(render_rounds, round_stride):
     return [round_index * round_stride for round_index in range(render_rounds)]
 
 
-def tensor_status_text(health, rounds, countdown, global_frame):
+def tensor_status_text(health, family_index, rounds, countdown, global_frame):
     active_health = health[health > 0]
     if active_health.size:
         avghealth = round(float(active_health.mean()))
         maxhealth = int(active_health.max())
+        unique_base_genomes = int(np.unique(family_index[health > 0]).size)
     else:
         avghealth = 0
         maxhealth = 0
+        unique_base_genomes = 0
     return (
         f'Frame {global_frame}  AVG HP {avghealth}  MAX HP {maxhealth}  '
-        f'Cells {active_health.size}  Rounds {rounds}  Countdown {countdown}'
+        f'Cells {active_health.size}  unique base genomes: {unique_base_genomes}  '
+        f'Rounds {rounds}  Countdown {countdown}'
     )
 
 
-def render_tensor_frame(index_grid, health, size, rounds, countdown, global_frame, cell_size, status_height, font):
+def render_tensor_frame(index_grid, health, family_index, size, rounds, countdown, global_frame, cell_size, status_height, font):
     visible = index_grid[2:size.lines, 2:size.columns + 2]
     rows, cols = visible.shape
     cells = np.full((rows, cols, 3), (8, 10, 14), dtype=np.uint8)
@@ -109,7 +112,7 @@ def render_tensor_frame(index_grid, health, size, rounds, countdown, global_fram
     draw.rectangle((0, status_y, cols * cell_size, rows * cell_size + status_height), fill=(14, 18, 24))
     draw.text(
         (6, status_y + 9),
-        tensor_status_text(health, rounds, countdown, global_frame),
+        tensor_status_text(health, family_index, rounds, countdown, global_frame),
         fill=(232, 238, 246),
         font=font,
     )
@@ -263,6 +266,7 @@ class TensorRank1VideoRun:
         return (
             self.state.index_grid.detach().cpu().numpy(),
             self.state.health.detach().cpu().numpy(),
+            self.state.family_index.detach().cpu().numpy(),
         )
 
     def render_round(self, writer, font):
@@ -270,10 +274,11 @@ class TensorRank1VideoRun:
         while self.countdown > 0:
             if not self.maybe_refill_empty():
                 return frames_written, False
-            index_grid, health = self.snapshot()
+            index_grid, health, family_index = self.snapshot()
             writer.append_data(render_tensor_frame(
                 index_grid,
                 health,
+                family_index,
                 self.size,
                 self.rounds,
                 self.countdown,

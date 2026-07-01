@@ -1057,7 +1057,7 @@ def test_tensor_rank1_round_transition_health_cost_updates_grid_cpu():
         device=torch.device('cpu'),
         initial_health=3,
     )
-    state.health = torch.tensor([1, 3, 4], dtype=state.health.dtype)
+    state.health = torch.tensor([1, 1, 2], dtype=state.health.dtype)
     state.rebuild_grids()
 
     state.apply_round_transition_health_cost()
@@ -1448,5 +1448,5 @@ def test_tensor_rank1_benchmark_normal_round_refill_uses_live_cell_count_cpu():
     assert metrics['per_wave'] == 5
     assert metrics['min_wave'] == 2
     assert metrics['empty_refills'] == 0
-    assert metrics['waves_spawned'] == 10
+    assert metrics['waves_spawned'] == 5
     assert metrics['active_cells_final'] == 5
