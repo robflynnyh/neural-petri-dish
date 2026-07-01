@@ -224,6 +224,23 @@ def test_lone_target_takes_extra_attack_damage():
     assert victim not in game.cells
     assert attacker in game.cells
     assert attacker.pos == [4, 5]
+    assert attacker.health == 7.0
+
+
+def test_kill_reward_is_capped_at_max_health():
+    game = npd.Game(size=(8, 8))
+    game.add_cell(4, 4)
+    game.add_cell(4, 5)
+    attacker = game.get_cell(4, 4)
+    victim = game.get_cell(4, 5)
+    attacker.health = 14.0
+    victim.health = 1.0
+    force_action(attacker, 3, attack=True)
+    force_action(victim, 0)
+
+    npd.step(game)
+
+    assert attacker.health == 15.0
 
 
 def test_mutation_uses_actual_neighbor_positions(monkeypatch):

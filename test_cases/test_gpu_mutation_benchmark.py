@@ -702,7 +702,7 @@ def test_snapshot_combat_kill_moves_attacker_and_rewards_health_cpu():
         sync_positions=False,
     )
 
-    assert state.health.tolist() == [4, 0]
+    assert state.health.tolist() == [7, 0]
     assert int(state.flat_positions[0].item()) == 3 * state.grid_stride + 4
     assert int(state.index_grid.reshape(-1)[state.flat_positions[0]].item()) == 0
 
@@ -728,7 +728,7 @@ def test_snapshot_combat_lone_target_takes_extra_damage_cpu():
         sync_positions=False,
     )
 
-    assert state.health.tolist() == [4, 0]
+    assert state.health.tolist() == [7, 0]
     assert int(state.flat_positions[0].item()) == 3 * state.grid_stride + 4
 
 

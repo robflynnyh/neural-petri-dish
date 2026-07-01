@@ -925,7 +925,7 @@ def apply_cell_action(game, cell, action):
         grid[new_y, new_x] = 0
         index.pop(new_y * stride + new_x, None)
         game.cells_removed_this_step = True
-        cell.add_health()
+        cell.add_health(KILL_HEALTH_REWARD)
         old_key = y * stride + x
         new_key = new_y * stride + new_x
         cell.y = new_y
@@ -1032,6 +1032,7 @@ def init(game, num=2500):
 ROUNDTIME = 500
 ROUND_TRANSITION_HEALTH_COST = 1
 MOVEMENT_HEALTH_COST = 0.1
+KILL_HEALTH_REWARD = 5
 PER_WAVE = 300
 MIN_WAVE = 250
 MAX_TOTAL = 1000
