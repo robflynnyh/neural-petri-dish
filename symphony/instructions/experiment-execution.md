@@ -21,6 +21,16 @@ logs under `symphony/logs/` or `test_cases/artifacts/`. Record:
 - output artifact paths
 - expected completion check
 
+If a long job will outlive the Symphony turn, launch it through an
+issue-specific wrapper based on `scripts/templates/queued_experiment_wrapper.template.sh`.
+Keep the `EXIT` trap intact so `scripts/callbacks/linear_experiment_callback.py`
+posts the result back to Linear and moves the issue back to `Todo`.
+
+For Stanage jobs, use an issue-specific copy of
+`scripts/templates/slurm_experiment_wrapper.template.sh` or a lightweight Slurm
+finalizer with the same callback helper. Do not pass `LINEAR_API_KEY` in command
+arguments or logs.
+
 Do not spend agent turns waiting for long queued or running work unless the
 issue explicitly asks for an inline result. If the job will outlive the turn,
 post a Linear queue comment and move the issue back to `Backlog`.

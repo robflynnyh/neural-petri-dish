@@ -24,6 +24,12 @@ Important files:
 - `test_cases/render_tensor_rank1_video.py`: long-run sampled MP4 renderer.
 - `test_cases/test_gpu_mutation_benchmark.py`: tensor engine regression tests.
 - `test_cases/test_simulation_core.py`: gameplay and core logic tests.
+- `scripts/callbacks/linear_experiment_callback.py`: Linear callback helper for
+  detached long-running jobs.
+- `scripts/templates/queued_experiment_wrapper.template.sh`: Mimas wrapper
+  template with an `EXIT` trap that calls the callback helper.
+- `scripts/templates/slurm_experiment_wrapper.template.sh`: Stanage wrapper
+  template with the same callback discipline.
 
 Generated artifacts:
 - `test_cases/artifacts/` is ignored locally. Commit only small artifacts that

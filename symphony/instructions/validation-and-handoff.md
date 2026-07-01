@@ -9,6 +9,10 @@ and then run `PYTHONPATH=. pytest -q` before handoff when feasible.
 For render/video changes, validate the generated media with `ffprobe`, inspect
 the manifest/metrics, and include the GitHub artifact link in the handoff.
 
+For detached long jobs, smoke test the actual wrapper or callback path before
+queueing the long run. A dry run of `scripts/callbacks/linear_experiment_callback.py`
+is not a substitute for preserving the wrapper `EXIT` trap.
+
 For documentation-only changes, run `git diff --check` and inspect the diff.
 
 If validation cannot run, document the exact blocker and the command that should
