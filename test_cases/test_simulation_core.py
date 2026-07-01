@@ -626,6 +626,32 @@ def test_cli_tensor_engine_bounded_run_writes_snapshots(tmp_path):
     assert metrics['renders'] == 0
 
 
+def test_tensor_rank1_static_wave_uses_per_cell_rank1_directions():
+    from tensor_rank1_sim import TensorRank1State
+
+    npd.seed_all(19)
+    state = TensorRank1State.fixed_capacity(
+        active_cells=0,
+        height=8,
+        width=8,
+        active_families=1,
+        family_capacity=4,
+        cell_capacity=16,
+        device='cpu',
+    )
+
+    spawned, active_family_count = state.append_static_weighted_wave(1, 8, coeff_scale=0.6)
+
+    alive = state.health > 0
+    assert spawned == 8
+    assert active_family_count == 2
+    assert int(torch.unique(state.family_index[alive]).numel()) == 1
+    assert not torch.allclose(state.u_1[alive][0], state.u_1[alive][1])
+    assert not torch.allclose(state.v_1[alive][0], state.v_1[alive][1])
+    assert not torch.allclose(state.u_2[alive][0], state.u_2[alive][1])
+    assert not torch.allclose(state.v_2[alive][0], state.v_2[alive][1])
+
+
 def test_cli_tensor_engine_help_exposes_render_cadence():
     script = Path(__file__).resolve().parents[1] / 'neural_petri_dish.py'
     result = subprocess.run(

@@ -141,6 +141,17 @@ def normalize_rank1_factors_(left, right):
     right.div_(scale)
 
 
+def normalize_rank1_factor_rows_(left, right):
+    rms = (
+        left.square().mean(dim=1).sqrt()
+        * right.square().mean(dim=1).sqrt()
+    ).clamp_min(torch.finfo(torch.float32).eps)
+    scale = rms.sqrt()
+    left.div_(scale.unsqueeze(1))
+    right.div_(scale.unsqueeze(1))
+    return left, right
+
+
 def init_linear_weight_bias(out_features, in_features, count, device):
     weights = torch.empty(count, out_features, in_features, device=device)
     biases = torch.empty(count, out_features, device=device)
@@ -228,18 +239,14 @@ def snapshot_combat_step_tensors(
     inputs[:, NEIGHBOR_INPUT_DIM:] = sanitize_recurrent_state(recurrent_state)
 
     selected_base_weight_1 = base_weight_1[family_index]
-    selected_v_1 = v_1[family_index]
-    selected_u_1 = u_1[family_index]
     base_hidden = torch.bmm(selected_base_weight_1, inputs.unsqueeze(2)).squeeze(2)
-    rank1_hidden_scale = (inputs * selected_v_1).sum(dim=1) * coeff_1
-    hidden = stabilize_hidden(torch.relu(base_hidden + rank1_hidden_scale.unsqueeze(1) * selected_u_1 + bias_1))
+    rank1_hidden_scale = (inputs * v_1).sum(dim=1) * coeff_1
+    hidden = stabilize_hidden(torch.relu(base_hidden + rank1_hidden_scale.unsqueeze(1) * u_1 + bias_1))
 
     selected_base_weight_2 = base_weight_2[family_index]
-    selected_v_2 = v_2[family_index]
-    selected_u_2 = u_2[family_index]
     base_logits = torch.bmm(selected_base_weight_2, hidden.unsqueeze(2)).squeeze(2)
-    rank1_logit_scale = (hidden * selected_v_2).sum(dim=1) * coeff_2
-    logits = stabilize_logits(base_logits + rank1_logit_scale.unsqueeze(1) * selected_u_2 + bias_2)
+    rank1_logit_scale = (hidden * v_2).sum(dim=1) * coeff_2
+    logits = stabilize_logits(base_logits + rank1_logit_scale.unsqueeze(1) * u_2 + bias_2)
     actions = packed_actions_from_logits(logits)
 
     old_flat_positions = flat_positions
@@ -332,18 +339,14 @@ def snapshot_combat_step_tensors_rebuild_grid(
     inputs[:, NEIGHBOR_INPUT_DIM:] = sanitize_recurrent_state(recurrent_state)
 
     selected_base_weight_1 = base_weight_1[family_index]
-    selected_v_1 = v_1[family_index]
-    selected_u_1 = u_1[family_index]
     base_hidden = torch.bmm(selected_base_weight_1, inputs.unsqueeze(2)).squeeze(2)
-    rank1_hidden_scale = (inputs * selected_v_1).sum(dim=1) * coeff_1
-    hidden = stabilize_hidden(torch.relu(base_hidden + rank1_hidden_scale.unsqueeze(1) * selected_u_1 + bias_1))
+    rank1_hidden_scale = (inputs * v_1).sum(dim=1) * coeff_1
+    hidden = stabilize_hidden(torch.relu(base_hidden + rank1_hidden_scale.unsqueeze(1) * u_1 + bias_1))
 
     selected_base_weight_2 = base_weight_2[family_index]
-    selected_v_2 = v_2[family_index]
-    selected_u_2 = u_2[family_index]
     base_logits = torch.bmm(selected_base_weight_2, hidden.unsqueeze(2)).squeeze(2)
-    rank1_logit_scale = (hidden * selected_v_2).sum(dim=1) * coeff_2
-    logits = stabilize_logits(base_logits + rank1_logit_scale.unsqueeze(1) * selected_u_2 + bias_2)
+    rank1_logit_scale = (hidden * v_2).sum(dim=1) * coeff_2
+    logits = stabilize_logits(base_logits + rank1_logit_scale.unsqueeze(1) * u_2 + bias_2)
     actions = packed_actions_from_logits(logits)
 
     directions = action_directions(actions)
@@ -454,19 +457,15 @@ def snapshot_combat_step_tensors_family_basis_rebuild_grid(
     base_hidden_all = base_hidden_flat.reshape(flat_positions.shape[0], family_count, HIDDEN_DIM)
     hidden_family_selector = family_index.reshape(-1, 1, 1).expand(-1, 1, HIDDEN_DIM)
     base_hidden = base_hidden_all.gather(1, hidden_family_selector).squeeze(1)
-    selected_v_1 = v_1[family_index]
-    selected_u_1 = u_1[family_index]
-    rank1_hidden_scale = (inputs * selected_v_1).sum(dim=1) * coeff_1
-    hidden = stabilize_hidden(torch.relu(base_hidden + rank1_hidden_scale.unsqueeze(1) * selected_u_1 + bias_1))
+    rank1_hidden_scale = (inputs * v_1).sum(dim=1) * coeff_1
+    hidden = stabilize_hidden(torch.relu(base_hidden + rank1_hidden_scale.unsqueeze(1) * u_1 + bias_1))
 
     base_logits_flat = hidden.matmul(base_weight_2_matmul)
     base_logits_all = base_logits_flat.reshape(flat_positions.shape[0], family_count, OUTPUT_DIM)
     output_family_selector = family_index.reshape(-1, 1, 1).expand(-1, 1, OUTPUT_DIM)
     base_logits = base_logits_all.gather(1, output_family_selector).squeeze(1)
-    selected_v_2 = v_2[family_index]
-    selected_u_2 = u_2[family_index]
-    rank1_logit_scale = (hidden * selected_v_2).sum(dim=1) * coeff_2
-    logits = stabilize_logits(base_logits + rank1_logit_scale.unsqueeze(1) * selected_u_2 + bias_2)
+    rank1_logit_scale = (hidden * v_2).sum(dim=1) * coeff_2
+    logits = stabilize_logits(base_logits + rank1_logit_scale.unsqueeze(1) * u_2 + bias_2)
     actions = packed_actions_from_logits(logits)
 
     directions = action_directions(actions)
@@ -761,13 +760,12 @@ class TensorRank1State:
         bias_2 = family_bias_2[family_index].clone()
         base_weight_1_matmul = flatten_base_weight_1_for_matmul(base_weight_1)
         base_weight_2_matmul = flatten_base_weight_2_for_matmul(base_weight_2)
-        u_1 = torch.randn(families, HIDDEN_DIM, device=device)
-        v_1 = torch.randn(families, INPUT_DIM, device=device)
-        u_2 = torch.randn(families, OUTPUT_DIM, device=device)
-        v_2 = torch.randn(families, HIDDEN_DIM, device=device)
-        for family_id in range(families):
-            normalize_rank1_factors_(u_1[family_id], v_1[family_id])
-            normalize_rank1_factors_(u_2[family_id], v_2[family_id])
+        u_1 = torch.randn(cells, HIDDEN_DIM, device=device)
+        v_1 = torch.randn(cells, INPUT_DIM, device=device)
+        u_2 = torch.randn(cells, OUTPUT_DIM, device=device)
+        v_2 = torch.randn(cells, HIDDEN_DIM, device=device)
+        normalize_rank1_factor_rows_(u_1, v_1)
+        normalize_rank1_factor_rows_(u_2, v_2)
 
         state = cls(
             grid=grid,
@@ -909,22 +907,6 @@ class TensorRank1State:
                 dtype=self.base_weight_2.dtype,
             ),
         ), dim=0)
-        self.u_1 = torch.cat((
-            self.u_1,
-            torch.zeros(extra, HIDDEN_DIM, device=self.device, dtype=self.u_1.dtype),
-        ), dim=0)
-        self.v_1 = torch.cat((
-            self.v_1,
-            torch.zeros(extra, INPUT_DIM, device=self.device, dtype=self.v_1.dtype),
-        ), dim=0)
-        self.u_2 = torch.cat((
-            self.u_2,
-            torch.zeros(extra, OUTPUT_DIM, device=self.device, dtype=self.u_2.dtype),
-        ), dim=0)
-        self.v_2 = torch.cat((
-            self.v_2,
-            torch.zeros(extra, HIDDEN_DIM, device=self.device, dtype=self.v_2.dtype),
-        ), dim=0)
         self.refresh_base_weight_matmul_cache()
 
     def refresh_base_weight_matmul_cache(self):
@@ -963,17 +945,6 @@ class TensorRank1State:
             self.base_weight_2,
             torch.randn(extra, OUTPUT_DIM, HIDDEN_DIM, device=self.device),
         ), dim=0)
-        extra_u_1 = torch.randn(extra, HIDDEN_DIM, device=self.device)
-        extra_v_1 = torch.randn(extra, INPUT_DIM, device=self.device)
-        extra_u_2 = torch.randn(extra, OUTPUT_DIM, device=self.device)
-        extra_v_2 = torch.randn(extra, HIDDEN_DIM, device=self.device)
-        for index in range(extra):
-            normalize_rank1_factors_(extra_u_1[index], extra_v_1[index])
-            normalize_rank1_factors_(extra_u_2[index], extra_v_2[index])
-        self.u_1 = torch.cat((self.u_1, extra_u_1), dim=0)
-        self.v_1 = torch.cat((self.v_1, extra_v_1), dim=0)
-        self.u_2 = torch.cat((self.u_2, extra_u_2), dim=0)
-        self.v_2 = torch.cat((self.v_2, extra_v_2), dim=0)
         self.refresh_base_weight_matmul_cache()
         self.single_active_family_id = None
         self._family_capacity_version = self.family_capacity_version() + 1
@@ -1164,37 +1135,33 @@ class TensorRank1State:
         single_family_id = self.single_active_family_id
         if single_family_id is not None:
             base_hidden = inputs.matmul(self.base_weight_1[single_family_id].t())
-            rank1_hidden_scale = inputs.matmul(self.v_1[single_family_id]) * self.coeff_1
+            rank1_hidden_scale = (inputs * self.v_1).sum(dim=1) * self.coeff_1
             hidden = base_hidden.addcmul_(
                 rank1_hidden_scale.unsqueeze(1),
-                self.u_1[single_family_id].unsqueeze(0),
+                self.u_1,
             ).add_(self.bias_1).relu_()
             hidden = stabilize_hidden(hidden)
             base_logits = hidden.matmul(self.base_weight_2[single_family_id].t())
-            rank1_logit_scale = hidden.matmul(self.v_2[single_family_id]) * self.coeff_2
+            rank1_logit_scale = (hidden * self.v_2).sum(dim=1) * self.coeff_2
             logits = base_logits.addcmul_(
                 rank1_logit_scale.unsqueeze(1),
-                self.u_2[single_family_id].unsqueeze(0),
+                self.u_2,
             )
         else:
             selected_base_weight_1 = self.base_weight_1[self.family_index]
-            selected_v_1 = self.v_1[self.family_index]
-            selected_u_1 = self.u_1[self.family_index]
             base_hidden = torch.bmm(selected_base_weight_1, inputs.unsqueeze(2)).squeeze(2)
-            rank1_hidden_scale = (inputs * selected_v_1).sum(dim=1) * self.coeff_1
+            rank1_hidden_scale = (inputs * self.v_1).sum(dim=1) * self.coeff_1
             hidden = base_hidden.addcmul_(
                 rank1_hidden_scale.unsqueeze(1),
-                selected_u_1,
+                self.u_1,
             ).add_(self.bias_1).relu_()
             hidden = stabilize_hidden(hidden)
             selected_base_weight_2 = self.base_weight_2[self.family_index]
-            selected_v_2 = self.v_2[self.family_index]
-            selected_u_2 = self.u_2[self.family_index]
             base_logits = torch.bmm(selected_base_weight_2, hidden.unsqueeze(2)).squeeze(2)
-            rank1_logit_scale = (hidden * selected_v_2).sum(dim=1) * self.coeff_2
+            rank1_logit_scale = (hidden * self.v_2).sum(dim=1) * self.coeff_2
             logits = base_logits.addcmul_(
                 rank1_logit_scale.unsqueeze(1),
-                selected_u_2,
+                self.u_2,
             )
         logits.add_(self.bias_2)
         logits = stabilize_logits(logits)
@@ -1222,10 +1189,6 @@ class TensorRank1State:
         self.base_weight_1 = self.base_weight_1[used_families]
         self.base_weight_2 = self.base_weight_2[used_families]
         self.refresh_base_weight_matmul_cache()
-        self.u_1 = self.u_1[used_families]
-        self.v_1 = self.v_1[used_families]
-        self.u_2 = self.u_2[used_families]
-        self.v_2 = self.v_2[used_families]
         self.family_index = inverse.to(self.family_index.dtype)
         self.refresh_single_active_family()
 
@@ -1383,20 +1346,14 @@ class TensorRank1State:
         if self.cells == 0:
             return torch.empty(0, HIDDEN_DIM, INPUT_DIM, device=self.device)
         selected_base = self.base_weight_1[self.family_index]
-        if self.families == 1:
-            direction = torch.outer(self.u_1[0], self.v_1[0]).unsqueeze(0)
-            return selected_base + self.coeff_1.reshape(-1, 1, 1) * direction
-        selected_direction = self.u_1[self.family_index].unsqueeze(2) * self.v_1[self.family_index].unsqueeze(1)
+        selected_direction = self.u_1.unsqueeze(2) * self.v_1.unsqueeze(1)
         return selected_base + self.coeff_1.reshape(-1, 1, 1) * selected_direction
 
     def dense_weight_2(self):
         if self.cells == 0:
             return torch.empty(0, OUTPUT_DIM, HIDDEN_DIM, device=self.device)
         selected_base = self.base_weight_2[self.family_index]
-        if self.families == 1:
-            direction = torch.outer(self.u_2[0], self.v_2[0]).unsqueeze(0)
-            return selected_base + self.coeff_2.reshape(-1, 1, 1) * direction
-        selected_direction = self.u_2[self.family_index].unsqueeze(2) * self.v_2[self.family_index].unsqueeze(1)
+        selected_direction = self.u_2.unsqueeze(2) * self.v_2.unsqueeze(1)
         return selected_base + self.coeff_2.reshape(-1, 1, 1) * selected_direction
 
     def weighted_survivor_family(self):
@@ -1451,13 +1408,7 @@ class TensorRank1State:
         self.evolution_anchor_weight_2 = base_weight_2.clone()
         self.evolution_anchor_bias_2 = base_bias_2.clone()
 
-        u_1 = torch.randn(HIDDEN_DIM, device=self.device)
-        v_1 = torch.randn(INPUT_DIM, device=self.device)
-        u_2 = torch.randn(OUTPUT_DIM, device=self.device)
-        v_2 = torch.randn(HIDDEN_DIM, device=self.device)
-        normalize_rank1_factors_(u_1, v_1)
-        normalize_rank1_factors_(u_2, v_2)
-        return base_weight_1, base_bias_1, base_weight_2, base_bias_2, u_1, v_1, u_2, v_2
+        return base_weight_1, base_bias_1, base_weight_2, base_bias_2
 
     def empty_positions(self):
         playable = self.index_grid[2:-2, 2:-2].reshape(-1)
@@ -1507,20 +1458,18 @@ class TensorRank1State:
             base_bias_1,
             base_weight_2,
             base_bias_2,
-            u_1,
-            v_1,
-            u_2,
-            v_2,
         ) = self.weighted_survivor_family()
 
         new_family_id = self.families
         self.base_weight_1 = torch.cat((self.base_weight_1, base_weight_1.unsqueeze(0)), dim=0)
         self.base_weight_2 = torch.cat((self.base_weight_2, base_weight_2.unsqueeze(0)), dim=0)
         self.refresh_base_weight_matmul_cache()
-        self.u_1 = torch.cat((self.u_1, u_1.unsqueeze(0)), dim=0)
-        self.v_1 = torch.cat((self.v_1, v_1.unsqueeze(0)), dim=0)
-        self.u_2 = torch.cat((self.u_2, u_2.unsqueeze(0)), dim=0)
-        self.v_2 = torch.cat((self.v_2, v_2.unsqueeze(0)), dim=0)
+        new_u_1 = torch.randn(spawn_count, HIDDEN_DIM, device=self.device)
+        new_v_1 = torch.randn(spawn_count, INPUT_DIM, device=self.device)
+        new_u_2 = torch.randn(spawn_count, OUTPUT_DIM, device=self.device)
+        new_v_2 = torch.randn(spawn_count, HIDDEN_DIM, device=self.device)
+        normalize_rank1_factor_rows_(new_u_1, new_v_1)
+        normalize_rank1_factor_rows_(new_u_2, new_v_2)
 
         self.positions = torch.cat((self.positions, new_positions), dim=0)
         self.flat_positions = torch.cat((self.flat_positions, new_flat_positions), dim=0)
@@ -1542,6 +1491,10 @@ class TensorRank1State:
         ), dim=0)
         self.coeff_1 = torch.cat((self.coeff_1, torch.randn(spawn_count, device=self.device) * coeff_scale), dim=0)
         self.coeff_2 = torch.cat((self.coeff_2, torch.randn(spawn_count, device=self.device) * coeff_scale), dim=0)
+        self.u_1 = torch.cat((self.u_1, new_u_1), dim=0)
+        self.v_1 = torch.cat((self.v_1, new_v_1), dim=0)
+        self.u_2 = torch.cat((self.u_2, new_u_2), dim=0)
+        self.v_2 = torch.cat((self.v_2, new_v_2), dim=0)
         self.bias_1 = torch.cat((self.bias_1, base_bias_1.expand(spawn_count, -1).clone()), dim=0)
         self.bias_2 = torch.cat((self.bias_2, base_bias_2.expand(spawn_count, -1).clone()), dim=0)
         self.single_active_family_id = new_family_id if old_cells == 0 else None
@@ -1586,19 +1539,17 @@ class TensorRank1State:
             base_bias_1,
             base_weight_2,
             base_bias_2,
-            u_1,
-            v_1,
-            u_2,
-            v_2,
         ) = self.weighted_survivor_family()
 
         self.base_weight_1[new_family_id] = base_weight_1
         self.base_weight_2[new_family_id] = base_weight_2
         self.refresh_base_weight_matmul_cache_row(new_family_id)
-        self.u_1[new_family_id] = u_1
-        self.v_1[new_family_id] = v_1
-        self.u_2[new_family_id] = u_2
-        self.v_2[new_family_id] = v_2
+        new_u_1 = torch.randn(spawn_count, HIDDEN_DIM, device=self.device)
+        new_v_1 = torch.randn(spawn_count, INPUT_DIM, device=self.device)
+        new_u_2 = torch.randn(spawn_count, OUTPUT_DIM, device=self.device)
+        new_v_2 = torch.randn(spawn_count, HIDDEN_DIM, device=self.device)
+        normalize_rank1_factor_rows_(new_u_1, new_v_1)
+        normalize_rank1_factor_rows_(new_u_2, new_v_2)
 
         self.flat_positions[slots] = new_flat_positions
         self.positions[slots, 0] = new_flat_positions.div(self.grid_stride, rounding_mode='floor')
@@ -1609,6 +1560,10 @@ class TensorRank1State:
         self.family_index[slots] = new_family_id
         self.coeff_1[slots] = torch.randn(spawn_count, device=self.device) * coeff_scale
         self.coeff_2[slots] = torch.randn(spawn_count, device=self.device) * coeff_scale
+        self.u_1[slots] = new_u_1
+        self.v_1[slots] = new_v_1
+        self.u_2[slots] = new_u_2
+        self.v_2[slots] = new_v_2
         self.bias_1[slots] = base_bias_1
         self.bias_2[slots] = base_bias_2
 
@@ -1637,6 +1592,10 @@ class TensorRank1State:
         self.family_index = self.family_index[alive]
         self.coeff_1 = self.coeff_1[alive]
         self.coeff_2 = self.coeff_2[alive]
+        self.u_1 = self.u_1[alive]
+        self.v_1 = self.v_1[alive]
+        self.u_2 = self.u_2[alive]
+        self.v_2 = self.v_2[alive]
         self.bias_1 = self.bias_1[alive]
         self.bias_2 = self.bias_2[alive]
         self.prune_unused_families()
