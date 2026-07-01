@@ -1,0 +1,25 @@
+Recovered preview from the live ROB-323 Linear/Symphony 100k render.
+
+This file was recovered from a copied snapshot of the still-running MP4, not from
+a separate simulation rerun. The active writer had not finalized the MP4 moov
+atom yet, so the snapshot was repaired with /store/store5/software/untrunc using
+the finalized 10k food/rank-1 MP4 as the matching reference.
+
+Source live file:
+test_cases/artifacts/tensor_rank1_100k_rounds_every_1000_survival_fitness_lr005_early_end_spawnx2_food25_hp2p5.mp4
+
+Snapshot:
+test_cases/artifacts/preview_recovery/live_100k_snapshot_20260701T213821Z.mp4
+Snapshot size: 10485808 bytes
+
+Recovered output:
+test_cases/artifacts/tensor_rank1_100k_linear_job_recovered_preview.mp4
+Recovered size: 10628304 bytes
+Duration: 1482.291 seconds
+Video: H.264, 640x498, 24 fps, 35575 frames
+
+Recovery tool:
+/store/store5/software/untrunc/untrunc
+untrunc version: v409-a87f33a
+Reference:
+test_cases/artifacts/tensor_rank1_10k_rounds_every_1000_survival_fitness_lr005_early_end_spawnx2_food25_hp2p5.mp4
