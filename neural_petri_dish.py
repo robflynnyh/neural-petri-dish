@@ -1068,6 +1068,7 @@ def main_tensor_rank1(args):
     frame = 0
     graph_runner = None
     block_steps = max(int(args.tensor_block_steps), 1)
+    render_every = args.tensor_render_every if args.tensor_render_every is not None else block_steps
     if device.type == 'cuda':
         compile_state = state.clone()
         compile_state.compiled_snapshot_combat_steps(
@@ -1133,6 +1134,7 @@ def main_tensor_rank1(args):
         )
 
     cursor_hidden = not args.no_render
+    last_render_frame = None
     if cursor_hidden:
         hide_cursor()
     try:
@@ -1144,9 +1146,14 @@ def main_tensor_rank1(args):
             if args.snapshot_dir and frame % args.snapshot_every == 0:
                 index_grid, health = tensor_snapshot()
                 write_tensor_snapshot(index_grid, health, size, rounds, countdown, frame, args.snapshot_dir)
-            if not args.no_render:
+            should_render = (
+                not args.no_render
+                and (last_render_frame is None or frame - last_render_frame >= render_every)
+            )
+            if should_render:
                 index_grid, health = tensor_snapshot()
                 draw_tensor_frame(index_grid, health, size, rounds, countdown, first_frame=(frame == 0))
+                last_render_frame = frame
 
             if countdown == 0:
                 spawn_wave(max(PER_WAVE - active_cell_count(), MIN_WAVE))
@@ -1281,6 +1288,7 @@ if __name__ == '__main__':
     parser.add_argument('--no-render', action='store_true', help='do not render frames to the terminal')
     parser.add_argument('--frame-rate', type=float, default=FRAME_RATE, help='seconds to sleep between frames')
     parser.add_argument('--tensor-block-steps', type=positive_int, default=50)
+    parser.add_argument('--tensor-render-every', type=positive_int)
     parser.add_argument('--tensor-family-capacity', type=positive_int, default=7)
     parser.add_argument('--tensor-cell-capacity', type=positive_int)
     parser.add_argument('--tensor-initial-health', type=positive_int, default=15)

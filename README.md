@@ -100,6 +100,9 @@ Run the simulator CLI with the GPU-resident tensor engine:
   python neural_petri_dish.py --engine tensor_rank1 --action-device cuda
 ```
 
+Use `--tensor-render-every N` to draw less often without changing the compiled
+simulation block size.
+
 Estimate the normal-size round workload on the fast GPU-resident rank-1 tensor
 engine. This is a debug projection for the intended simulator engine path; the
 current interactive `Game`/`Cell` normal-play loop is still measured with

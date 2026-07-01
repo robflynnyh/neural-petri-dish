@@ -481,6 +481,19 @@ def test_cli_tensor_engine_bounded_run_writes_snapshots(tmp_path):
     assert '#' in first_snapshot
 
 
+def test_cli_tensor_engine_help_exposes_render_cadence():
+    script = Path(__file__).resolve().parents[1] / 'neural_petri_dish.py'
+    result = subprocess.run(
+        [sys.executable, str(script), '--help'],
+        capture_output=True,
+        text=True,
+        timeout=20,
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert '--tensor-render-every' in result.stdout
+
+
 def test_video_renderer_writes_artifact_and_manifest(tmp_path):
     script = Path(__file__).resolve().parent / 'render_video.py'
     output = tmp_path / 'preview.mp4'
