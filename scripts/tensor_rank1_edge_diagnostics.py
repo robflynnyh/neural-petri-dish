@@ -15,6 +15,8 @@ from tensor_rank1_sim import (
     KILL_REWARD,
     MAX_HEALTH,
     TensorRank1State,
+    action_attack_intents,
+    action_directions,
     resolve_device,
     resolve_health_dtype,
     snapshot_attack_damage,
@@ -83,13 +85,17 @@ def safe_div(numerator, denominator):
 def action_counts(state, actions):
     health = state.health
     active = health > 0
-    moving = active & (actions != 0)
-    target_flat_positions = state.flat_positions + state.direction_flat_deltas[actions]
+    directions = action_directions(actions)
+    attack_intents = action_attack_intents(actions)
+    targeted = active & (directions != 0)
+    moving = targeted & ~attack_intents
+    attacking = targeted & attack_intents
+    target_flat_positions = state.flat_positions + state.direction_flat_deltas[directions]
     target_indices = state.index_grid.reshape(-1)[target_flat_positions]
 
     hits_border = moving & (target_indices == -2)
     hits_empty = moving & (target_indices == -1)
-    hits_occupied = moving & (target_indices >= 0)
+    hits_occupied = attacking & (target_indices >= 0)
 
     valid_targets = target_indices.clamp_min(0).to(torch.long)
     attack_damage = snapshot_attack_damage(
@@ -124,10 +130,11 @@ def action_counts(state, actions):
     return {
         'active_observations': count_tensor(active),
         'edge_cell_observations': count_tensor(edge_cells),
-        'stationary_actions': count_tensor(active & (actions == 0)),
+        'stationary_actions': count_tensor(active & (directions == 0)),
         'move_intents': count_tensor(moving),
+        'attack_intents': count_tensor(attacking),
         'empty_move_intents': count_tensor(hits_empty),
-        'occupied_move_intents': count_tensor(hits_occupied),
+        'attack_hit_intents': count_tensor(hits_occupied),
         'border_hit_intents': count_tensor(hits_border),
         'edge_cell_border_hit_intents': count_tensor(edge_cells & hits_border),
         'target_survives_intents': count_tensor(target_survives),
@@ -139,7 +146,8 @@ def action_counts(state, actions):
 def summarize_counts(counts, steps, elapsed_seconds, state, active_family_count, waves_spawned, coeff_scale):
     active_observations = counts.get('active_observations', 0)
     move_intents = counts.get('move_intents', 0)
-    occupied_move_intents = counts.get('occupied_move_intents', 0)
+    attack_intents = counts.get('attack_intents', 0)
+    attack_hit_intents = counts.get('attack_hit_intents', 0)
     edge_cell_observations = counts.get('edge_cell_observations', 0)
     border_hit_intents = counts.get('border_hit_intents', 0)
     total_deaths = counts.get('total_deaths', 0)
@@ -157,12 +165,13 @@ def summarize_counts(counts, steps, elapsed_seconds, state, active_family_count,
         'waves_spawned': waves_spawned,
         'stationary_rate': safe_div(counts.get('stationary_actions', 0), active_observations),
         'move_intent_rate': safe_div(move_intents, active_observations),
+        'attack_intent_rate': safe_div(attack_intents, active_observations),
         'border_hit_rate_per_alive': safe_div(border_hit_intents, active_observations),
         'border_hit_rate_per_move': safe_div(border_hit_intents, move_intents),
         'edge_cell_border_hit_rate': safe_div(counts.get('edge_cell_border_hit_intents', 0), edge_cell_observations),
         'empty_move_rate_per_move': safe_div(counts.get('empty_move_intents', 0), move_intents),
-        'occupied_move_rate_per_move': safe_div(occupied_move_intents, move_intents),
-        'kill_intent_rate_per_occupied': safe_div(counts.get('kill_intents', 0), occupied_move_intents),
+        'attack_hit_rate_per_attack': safe_div(attack_hit_intents, attack_intents),
+        'kill_intent_rate_per_attack_hit': safe_div(counts.get('kill_intents', 0), attack_hit_intents),
         'death_rate_per_alive': safe_div(total_deaths, active_observations),
         'predicted_border_death_rate_per_alive': safe_div(counts.get('predicted_border_deaths', 0), active_observations),
     }

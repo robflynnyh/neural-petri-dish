@@ -11,6 +11,8 @@ import sys
 import time
 
 from rank1_genome import (
+    ATTACK_OUTPUT_INDEX,
+    DIRECTION_OUTPUT_DIM,
     FACTORED_WAVE_COEFF_SCALE,
     HIDDEN_DIM,
     LinearGenes,
@@ -164,6 +166,24 @@ def attack_damage_for_target(game, target_y, target_x, attacker):
         damage += LONE_TARGET_DAMAGE_BONUS
     return damage
 
+
+def pack_action(direction, attack):
+    return int(direction) + (DIRECTION_OUTPUT_DIM if attack else 0)
+
+
+def action_direction(action):
+    return int(action) % DIRECTION_OUTPUT_DIM
+
+
+def action_is_attack(action):
+    return int(action) >= DIRECTION_OUTPUT_DIM
+
+
+def action_from_logits(logits):
+    direction = int(logits[:DIRECTION_OUTPUT_DIM].argmax())
+    attack = bool(logits[ATTACK_OUTPUT_INDEX] > 0.0)
+    return pack_action(direction, attack)
+
 class Cell:
     '''
     Manages each cell, it's genes and it's neural network
@@ -242,7 +262,7 @@ class Cell:
         self.commit_forward_state(hidden)
         np.dot(self.linear2.weight_np, hidden, out=output)
         output += self.linear2.bias_np
-        return int(output.argmax())
+        return action_from_logits(output)
 
     def forward_from_input_buffer(self):
         buffer = self.input_buffer
@@ -255,7 +275,7 @@ class Cell:
         self.commit_forward_state(hidden)
         np.dot(self.linear2.weight_np, hidden, out=output)
         output += self.linear2.bias_np
-        return int(output.argmax())
+        return action_from_logits(output)
 
     def commit_forward_state(self, hidden):
         self.prev_state[:] = hidden
@@ -763,7 +783,9 @@ def planned_packed_family_action_list(game, groups, device, cell_count):
         ).unsqueeze(1) * selected_u_2
     logits = base_logits.add_(rank1_logits).add_(bias_2_tensor)
 
-    actions = logits.argmax(dim=1).detach().cpu().numpy()
+    directions = logits[:, :DIRECTION_OUTPUT_DIM].argmax(dim=1)
+    attacks = logits[:, ATTACK_OUTPUT_INDEX] > 0
+    actions = (directions + attacks.to(directions.dtype) * DIRECTION_OUTPUT_DIM).detach().cpu().numpy()
     hidden_np = hidden.detach().cpu().numpy()
     planned = [None] * cell_count
     for index, planned_index in enumerate(planned_indices):
@@ -805,7 +827,9 @@ def planned_grouped_family_action_list(game, groups, device, cell_count):
         ).unsqueeze(1) * family_tensors['u_2'].unsqueeze(0)
         logits = base_logits.add_(rank1_logits).add_(bias_2_tensor)
 
-        actions = logits.argmax(dim=1).detach().cpu().numpy()
+        directions = logits[:, :DIRECTION_OUTPUT_DIM].argmax(dim=1)
+        attacks = logits[:, ATTACK_OUTPUT_INDEX] > 0
+        actions = (directions + attacks.to(directions.dtype) * DIRECTION_OUTPUT_DIM).detach().cpu().numpy()
         hidden_np = hidden.detach().cpu().numpy()
         for index, (planned_index, _cell) in enumerate(group):
             planned[planned_index] = (int(actions[index]), hidden_np[index])
@@ -841,6 +865,80 @@ def planned_family_actions(game, cells):
     }
 
 
+def apply_cell_action(game, cell, action):
+    direction = action_direction(action)
+    if direction == 0:
+        return
+
+    attack_intent = action_is_attack(action)
+    grid = game.grid
+    index = game.cells_by_pos
+    stride = game._cell_key_stride
+    y, x = cell.y, cell.x
+    dy, dx = DIRECTION_DELTAS[direction]
+    new_y = y + dy
+    new_x = x + dx
+    target_value = grid[new_y, new_x]
+
+    if target_value == -1:
+        if not attack_intent:
+            cell.health -= 1
+            if cell.health <= 0:
+                grid[y, x] = 0
+                index.pop(y * stride + x, None)
+                game.cells_removed_this_step = True
+        return
+
+    if not attack_intent:
+        if target_value != 0:
+            return
+        old_key = y * stride + x
+        new_key = new_y * stride + new_x
+        cell.y = new_y
+        cell.x = new_x
+        cell.pos = [new_y, new_x]
+        grid[new_y, new_x] = 1
+        index.pop(old_key, None)
+        index[new_key] = cell
+        grid[y, x] = 0
+        return
+
+    if target_value == 0:
+        return
+
+    ncell = index.get(new_y * stride + new_x, False)
+    if ncell == False:
+        if new_y < 2 or new_y > game.size.lines - 2 or new_x < 2 or new_x > game.size.columns - 2:
+            grid[new_y, new_x] = -1
+        else:
+            grid[new_y, new_x] = 0
+        return
+
+    ncell.health -= attack_damage_for_target(game, new_y, new_x, cell)
+    success = ncell.health <= 0
+    if success:
+        grid[new_y, new_x] = 0
+        index.pop(new_y * stride + new_x, None)
+        game.cells_removed_this_step = True
+        cell.add_health()
+        old_key = y * stride + x
+        new_key = new_y * stride + new_x
+        cell.y = new_y
+        cell.x = new_x
+        cell.pos = [new_y, new_x]
+        grid[new_y, new_x] = 1
+        index.pop(old_key, None)
+        index[new_key] = cell
+        grid[y, x] = 0
+        game.add_cell(y, x, game.mutate(cell))
+    else:
+        cell.health -= 1
+        if cell.health <= 0:
+            grid[y, x] = 0
+            index.pop(y * stride + x, None)
+            game.cells_removed_this_step = True
+
+
 def step_sequential(game):
     cells = list(game.cells)
     game.defer_cell_list_removals = True
@@ -848,9 +946,6 @@ def step_sequential(game):
     grid = game.grid
     index = game.cells_by_pos
     stride = game._cell_key_stride
-    direction_deltas = DIRECTION_DELTAS
-    mutate = game.mutate
-    add_cell = game.add_cell
     try:
         for cell in cells:
             if index.get(cell.y * stride + cell.x) is not cell:
@@ -858,61 +953,7 @@ def step_sequential(game):
             y, x = cell.y, cell.x
             neighbors = grid[y-2:y+3, x-2:x+3].reshape(25)
             action = cell.forward_flat_neighbors25(neighbors)
-
-            if action != 0:
-                dy, dx = direction_deltas[action]
-                new_y = y + dy
-                new_x = x + dx
-
-                if grid[new_y, new_x] != -1:
-                    if grid[new_y, new_x] == 0:
-                        old_key = y * stride + x
-                        new_key = new_y * stride + new_x
-                        cell.y = new_y
-                        cell.x = new_x
-                        cell.pos = [new_y, new_x]
-                        grid[new_y, new_x] = 1
-                        del index[old_key]
-                        index[new_key] = cell
-                        grid[y, x] = 0
-                    else:
-                        ncell = index.get(new_y * stride + new_x, False)
-                        if ncell == False:
-                            if new_y < 2 or new_y > game.size.lines-2 or new_x < 2 or new_x > game.size.columns-2:
-                                grid[new_y, new_x] = -1
-                            else:
-                                grid[new_y, new_x] = 0
-                            continue
-
-                        ncell.health -= attack_damage_for_target(game, new_y, new_x, cell)
-                        success = ncell.health <= 0
-                        if success:
-                            grid[new_y, new_x] = 0
-                            del index[new_y * stride + new_x]
-                            game.cells_removed_this_step = True
-                            cell.add_health()
-                            old_key = y * stride + x
-                            new_key = new_y * stride + new_x
-                            cell.y = new_y
-                            cell.x = new_x
-                            cell.pos = [new_y, new_x]
-                            grid[new_y, new_x] = 1
-                            del index[old_key]
-                            index[new_key] = cell
-                            grid[y, x] = 0
-                            add_cell(y, x, mutate(cell))
-                        else:
-                            cell.health -= 1
-                            if cell.health <= 0:
-                                grid[y, x] = 0
-                                del index[y * stride + x]
-                                game.cells_removed_this_step = True
-                else:
-                    cell.health -= 1
-                    if cell.health <= 0:
-                        grid[y, x] = 0
-                        del index[y * stride + x]
-                        game.cells_removed_this_step = True
+            apply_cell_action(game, cell, action)
     finally:
         game.defer_cell_list_removals = False
         if game.cells_removed_this_step:
@@ -956,69 +997,7 @@ def step(game):
                     action, hidden = planned
                     cell.commit_forward_state(hidden)
 
-            if action != 0:
-                dy, dx = DIRECTION_DELTAS[action]
-                new_y = y + dy
-                new_x = x + dx
-
-
-                if grid[new_y, new_x] != -1:
-
-                    if grid[new_y, new_x] == 0: # if the new location is empty
-                        old_key = int(y) * stride + int(x)
-                        new_key = new_y * stride + new_x
-                        cell.y = new_y
-                        cell.x = new_x
-                        cell.pos = [new_y, new_x]
-                        grid[new_y, new_x] = 1
-                        index.pop(old_key, None)
-                        index[new_key] = cell
-                        grid[y, x] = 0
-                    else:
-                        #sucess = game.damage_cell(game.get_cell(*new_loc)) # bites the other cell
-                        ###
-                        ncell = index.get(new_y * stride + new_x, False)
-                        if ncell == False:
-                            if new_y < 2 or new_y > game.size.lines-2 or new_x < 2 or new_x > game.size.columns-2:
-                                grid[new_y, new_x] = -1
-                            else:
-                                grid[new_y, new_x] = 0
-                            continue
-                        ###
-                        ncell.health -= attack_damage_for_target(game, new_y, new_x, cell)
-                        sucess = ncell.health <= 0
-                        if sucess:
-                            grid[new_y, new_x] = 0
-                            index.pop(new_y * stride + new_x, None)
-                            game.cells_removed_this_step = True
-                        if sucess: # if the other cell dies
-                            cell.add_health() # gains health cus it ate !
-                            old_key = int(y) * stride + int(x)
-                            new_key = new_y * stride + new_x
-                            cell.y = new_y
-                            cell.x = new_x
-                            cell.pos = [new_y, new_x]
-                            grid[new_y, new_x] = 1
-                            index.pop(old_key, None)
-                            index[new_key] = cell
-                            grid[y, x] = 0
-                            game.add_cell(y, x, game.mutate(cell))
-                        else:
-                            cell.health -= 1
-                            if cell.health <= 0:
-                                grid[y, x] = 0
-                                index.pop(int(y) * stride + int(x), None)
-                                game.cells_removed_this_step = True
-                else:
-                    cell.health -= 1
-                    if cell.health <= 0:
-                        grid[y, x] = 0
-                        index.pop(int(y) * stride + int(x), None)
-                        game.cells_removed_this_step = True
-            else:
-                pass
-                #game.damage_cell(cell) # if it doesn't move it loses health
-                #game.remove_cell(y, x) # if it doesn't move it dies
+            apply_cell_action(game, cell, action)
     finally:
         game.defer_cell_list_removals = False
         if game.cells_removed_this_step:
@@ -1046,7 +1025,7 @@ def init(game, num=2500):
     return game
 
 ROUNDTIME = 500
-ROUND_TRANSITION_HEALTH_COST = 2
+ROUND_TRANSITION_HEALTH_COST = 3
 PER_WAVE = 300
 MIN_WAVE = 250
 MAX_TOTAL = 1000

@@ -9,9 +9,11 @@ import torch
 
 
 NEIGHBOR_DIM = 24
-HIDDEN_DIM = 64
+HIDDEN_DIM = 32
 INPUT_DIM = NEIGHBOR_DIM + HIDDEN_DIM
-OUTPUT_DIM = 9
+DIRECTION_OUTPUT_DIM = 9
+ATTACK_OUTPUT_INDEX = DIRECTION_OUTPUT_DIM
+OUTPUT_DIM = DIRECTION_OUTPUT_DIM + 1
 MODES = ('shared_rank1_factored',)
 DEFAULT_MODE = 'shared_rank1_factored'
 
@@ -112,7 +114,9 @@ class FactoredSharedRank1Population:
         rank1_logits = (hidden.matmul(self.v_2) * self.coeff_2).unsqueeze(1) * self.u_2.unsqueeze(0)
         logits = base_logits.add_(rank1_logits)
         self.state = hidden.detach()
-        return logits.argmax(dim=1)
+        directions = logits[:, :DIRECTION_OUTPUT_DIM].argmax(dim=1)
+        attacks = logits[:, ATTACK_OUTPUT_INDEX] > 0
+        return directions + attacks.to(directions.dtype) * DIRECTION_OUTPUT_DIM
 
     def mutate_(self, mode, scale):
         if mode != 'shared_rank1_factored':

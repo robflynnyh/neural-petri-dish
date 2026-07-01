@@ -12,13 +12,14 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))
 import neural_petri_dish as npd
 
 
-def force_action(cell, action):
+def force_action(cell, action, attack=False):
     with torch.no_grad():
         cell.linear.weight.zero_()
         cell.linear.bias.zero_()
         cell.linear2.weight.zero_()
         cell.linear2.bias.fill_(-1)
         cell.linear2.bias[action] = 1
+        cell.linear2.bias[npd.ATTACK_OUTPUT_INDEX] = 1 if attack else -1
 
 
 def positions(game):
@@ -117,7 +118,7 @@ def test_step_skips_cell_removed_earlier_in_same_tick(monkeypatch):
     attacker = game.get_cell(4, 4)
     victim = game.get_cell(4, 5)
     victim.health = 1
-    force_action(attacker, 3)
+    force_action(attacker, 3, attack=True)
 
     def fail_if_called(_neighbors):
         raise AssertionError('removed victim should not act')
@@ -139,7 +140,7 @@ def test_unsuccessful_attack_damages_attacker_and_victim():
     attacker = game.get_cell(4, 4)
     victim = game.get_cell(4, 5)
     protector = game.get_cell(5, 5)
-    force_action(attacker, 3)
+    force_action(attacker, 3, attack=True)
     force_action(victim, 0)
     force_action(protector, 0)
 
@@ -152,13 +153,43 @@ def test_unsuccessful_attack_damages_attacker_and_victim():
     assert positions(game) == [(4, 4), (4, 5), (5, 5)]
 
 
+def test_move_intent_into_occupied_square_misses_turn():
+    game = npd.Game(size=(8, 8))
+    game.add_cell(4, 4)
+    game.add_cell(4, 5)
+    mover = game.get_cell(4, 4)
+    blocker = game.get_cell(4, 5)
+    force_action(mover, 3, attack=False)
+    force_action(blocker, 0)
+
+    npd.step(game)
+
+    assert mover.health == 2
+    assert blocker.health == 2
+    assert mover.pos == [4, 4]
+    assert blocker.pos == [4, 5]
+
+
+def test_attack_intent_into_empty_square_misses_turn():
+    game = npd.Game(size=(8, 8))
+    game.add_cell(4, 4)
+    attacker = game.get_cell(4, 4)
+    force_action(attacker, 3, attack=True)
+
+    npd.step(game)
+
+    assert len(game.cells) == 1
+    assert attacker.health == 2
+    assert attacker.pos == [4, 4]
+
+
 def test_lone_target_takes_extra_attack_damage():
     game = npd.Game(size=(8, 8))
     game.add_cell(4, 4)
     game.add_cell(4, 5)
     attacker = game.get_cell(4, 4)
     victim = game.get_cell(4, 5)
-    force_action(attacker, 3)
+    force_action(attacker, 3, attack=True)
     force_action(victim, 0)
 
     npd.step(game)
@@ -376,7 +407,7 @@ def test_round_transition_costs_survivor_health_before_wave_spawn():
     game.add_cell(2, 3)
     first, second = game.cells
     first.health = 1
-    second.health = 3
+    second.health = 4
 
     game, countdown = npd.advance_round(game, 0)
 
@@ -415,7 +446,7 @@ def test_lethal_attack_moves_attacker_and_refills_origin(monkeypatch):
     game.add_cell(4, 5)
     attacker = game.get_cell(4, 4)
     victim = game.get_cell(4, 5)
-    force_action(attacker, 3)
+    force_action(attacker, 3, attack=True)
     force_action(victim, 3)
     victim.health = 1
     monkeypatch.setattr(npd.random, 'choice', lambda items: items[0])

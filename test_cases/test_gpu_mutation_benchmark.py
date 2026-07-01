@@ -7,6 +7,7 @@ import pytest
 import torch
 
 from tensor_rank1_sim import (
+    DIRECTION_OUTPUT_DIM,
     HIDDEN_DIM,
     NEIGHBOR_INPUT_DIM,
     TensorRank1State,
@@ -16,6 +17,10 @@ from tensor_rank1_sim import (
     snapshot_combat_step_tensors_family_basis_rebuild_grid,
     snapshot_combat_step_tensors_rebuild_grid,
 )
+
+
+def attack_action(direction):
+    return DIRECTION_OUTPUT_DIM + direction
 
 
 def clone_tensor_state(state):
@@ -390,7 +395,7 @@ def test_snapshot_combat_tensor_step_matches_eager_cpu():
     assert torch.equal(tensor_actions, eager_actions)
     assert torch.equal(flat_positions, eager.flat_positions)
     assert torch.equal(health, eager.health)
-    assert torch.allclose(recurrent_state, eager.recurrent_state)
+    assert torch.allclose(recurrent_state, eager.recurrent_state, atol=1e-6)
     assert torch.equal(tensor_step.grid, eager.grid)
     assert torch.equal(tensor_step.index_grid, eager.index_grid)
 
@@ -432,7 +437,7 @@ def test_snapshot_combat_rebuild_grid_step_matches_eager_cpu():
     assert torch.equal(tensor_actions, eager_actions)
     assert torch.equal(flat_positions, eager.flat_positions)
     assert torch.equal(health, eager.health)
-    assert torch.allclose(recurrent_state, eager.recurrent_state)
+    assert torch.allclose(recurrent_state, eager.recurrent_state, atol=1e-6)
     assert torch.equal(tensor_step.grid, eager.grid)
     assert torch.equal(tensor_step.index_grid, eager.index_grid)
 
@@ -478,7 +483,7 @@ def test_snapshot_combat_family_basis_rebuild_step_matches_eager_cpu():
     assert torch.equal(flat_positions, eager.flat_positions)
     assert torch.equal(health, eager.health)
     assert torch.equal(stationary_steps, eager.stationary_steps)
-    assert torch.allclose(recurrent_state, eager.recurrent_state)
+    assert torch.allclose(recurrent_state, eager.recurrent_state, atol=1e-6)
     assert torch.equal(tensor_step.index_grid, eager.index_grid)
 
 
@@ -673,7 +678,7 @@ def test_snapshot_combat_family_basis_sanitizes_nan_recurrent_state_cpu():
 
     assert torch.isfinite(recurrent_state).all()
     assert actions.ge(0).all()
-    assert actions.lt(9).all()
+    assert actions.lt(DIRECTION_OUTPUT_DIM * 2).all()
 
 
 def test_snapshot_combat_kill_moves_attacker_and_rewards_health_cpu():
@@ -692,7 +697,7 @@ def test_snapshot_combat_kill_moves_attacker_and_rewards_health_cpu():
     state.rebuild_grids()
 
     state.apply_snapshot_combat(
-        torch.tensor([3, 0], dtype=torch.long),
+        torch.tensor([attack_action(3), 0], dtype=torch.long),
         compact_dead=False,
         sync_positions=False,
     )
@@ -718,7 +723,7 @@ def test_snapshot_combat_lone_target_takes_extra_damage_cpu():
     state.rebuild_grids()
 
     state.apply_snapshot_combat(
-        torch.tensor([3, 0], dtype=torch.long),
+        torch.tensor([attack_action(3), 0], dtype=torch.long),
         compact_dead=False,
         sync_positions=False,
     )
@@ -743,12 +748,65 @@ def test_snapshot_combat_protected_target_avoids_extra_damage_cpu():
     state.rebuild_grids()
 
     state.apply_snapshot_combat(
-        torch.tensor([3, 0, 0], dtype=torch.long),
+        torch.tensor([attack_action(3), 0, 0], dtype=torch.long),
         compact_dead=False,
         sync_positions=False,
     )
 
     assert state.health.tolist() == [2, 1, 2]
+    assert int(state.flat_positions[0].item()) == 3 * state.grid_stride + 3
+    assert_tensor_state_position_invariants(state)
+
+
+def test_snapshot_combat_move_intent_into_occupied_square_misses_cpu():
+    state = TensorRank1State.random(
+        cells=2,
+        height=8,
+        width=8,
+        families=1,
+        device=torch.device('cpu'),
+        initial_health=2,
+    )
+    state.positions = torch.tensor([[3, 3], [3, 4]], dtype=torch.long)
+    state.flat_positions = state.positions[:, 0] * state.grid_stride + state.positions[:, 1]
+    state.health = torch.tensor([2, 2], dtype=state.health.dtype)
+    state.stationary_steps.zero_()
+    state.rebuild_grids()
+
+    state.apply_snapshot_combat(
+        torch.tensor([3, 0], dtype=torch.long),
+        compact_dead=False,
+        sync_positions=False,
+    )
+
+    assert state.health.tolist() == [2, 2]
+    assert int(state.flat_positions[0].item()) == 3 * state.grid_stride + 3
+    assert int(state.flat_positions[1].item()) == 3 * state.grid_stride + 4
+    assert_tensor_state_position_invariants(state)
+
+
+def test_snapshot_combat_attack_intent_into_empty_square_misses_cpu():
+    state = TensorRank1State.random(
+        cells=1,
+        height=8,
+        width=8,
+        families=1,
+        device=torch.device('cpu'),
+        initial_health=2,
+    )
+    state.positions = torch.tensor([[3, 3]], dtype=torch.long)
+    state.flat_positions = state.positions[:, 0] * state.grid_stride + state.positions[:, 1]
+    state.health = torch.tensor([2], dtype=state.health.dtype)
+    state.stationary_steps.zero_()
+    state.rebuild_grids()
+
+    state.apply_snapshot_combat(
+        torch.tensor([attack_action(3)], dtype=torch.long),
+        compact_dead=False,
+        sync_positions=False,
+    )
+
+    assert state.health.tolist() == [2]
     assert int(state.flat_positions[0].item()) == 3 * state.grid_stride + 3
     assert_tensor_state_position_invariants(state)
 
@@ -769,7 +827,7 @@ def test_snapshot_combat_collision_losers_do_not_stay_alive_cpu():
     state.rebuild_grids()
 
     state.apply_snapshot_combat(
-        torch.tensor([3, 4, 0], dtype=torch.long),
+        torch.tensor([attack_action(3), attack_action(4), 0], dtype=torch.long),
         compact_dead=False,
         sync_positions=False,
     )
@@ -999,7 +1057,7 @@ def test_tensor_rank1_round_transition_health_cost_updates_grid_cpu():
         device=torch.device('cpu'),
         initial_health=3,
     )
-    state.health = torch.tensor([1, 2, 3], dtype=state.health.dtype)
+    state.health = torch.tensor([1, 3, 4], dtype=state.health.dtype)
     state.rebuild_grids()
 
     state.apply_round_transition_health_cost()

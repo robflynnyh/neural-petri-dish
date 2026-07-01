@@ -9,6 +9,8 @@ import neural_petri_dish as npd
 NEIGHBOR_INPUT_DIM = npd.NEIGHBOR_INPUT_DIM
 INPUT_DIM = npd.NETWORK_INPUT_DIM
 HIDDEN_DIM = npd.HIDDEN_DIM
+DIRECTION_OUTPUT_DIM = npd.DIRECTION_OUTPUT_DIM
+ATTACK_OUTPUT_INDEX = npd.ATTACK_OUTPUT_INDEX
 OUTPUT_DIM = npd.OUTPUT_DIM
 GRID_DTYPE = torch.int8
 INDEX_GRID_DTYPE = torch.int32
@@ -111,6 +113,20 @@ def stabilize_logits(logits):
     return logits.clamp_(-LOGIT_LIMIT, LOGIT_LIMIT)
 
 
+def packed_actions_from_logits(logits):
+    directions = logits[:, :DIRECTION_OUTPUT_DIM].argmax(dim=1)
+    attacks = logits[:, ATTACK_OUTPUT_INDEX] > 0
+    return directions + attacks.to(directions.dtype) * DIRECTION_OUTPUT_DIM
+
+
+def action_directions(actions):
+    return actions.remainder(DIRECTION_OUTPUT_DIM)
+
+
+def action_attack_intents(actions):
+    return actions >= DIRECTION_OUTPUT_DIM
+
+
 def snapshot_attack_damage(hits_occupied, target_flat_positions, attacker_indices, index_flat, direction_flat_deltas, dtype):
     has_other_neighbor = torch.zeros_like(hits_occupied)
     for offset_index in range(1, 9):
@@ -160,16 +176,20 @@ def snapshot_combat_step_tensors(
     base_logits = torch.bmm(selected_base_weight_2, hidden.unsqueeze(2)).squeeze(2)
     rank1_logit_scale = (hidden * selected_v_2).sum(dim=1) * coeff_2
     logits = stabilize_logits(base_logits + rank1_logit_scale.unsqueeze(1) * selected_u_2 + bias_2)
-    actions = logits.argmax(dim=1)
+    actions = packed_actions_from_logits(logits)
 
     old_flat_positions = flat_positions
-    target_flat_positions = flat_positions + direction_flat_deltas[actions]
+    directions = action_directions(actions)
+    attack_intents = action_attack_intents(actions)
+    target_flat_positions = flat_positions + direction_flat_deltas[directions]
     target_indices = index_grid.reshape(-1)[target_flat_positions]
     active = health > 0
-    moving = active & (actions != 0)
-    hits_border = moving & (target_indices == -2)
-    hits_empty = moving & (target_indices == -1)
-    hits_occupied = moving & (target_indices >= 0)
+    targeted = active & (directions != 0)
+    move_intents = targeted & ~attack_intents
+    attack_intents = targeted & attack_intents
+    hits_border = move_intents & (target_indices == -2)
+    hits_empty = move_intents & (target_indices == -1)
+    hits_occupied = attack_intents & (target_indices >= 0)
 
     valid_targets = target_indices.clamp_min(0).to(torch.long)
     attacker_indices = torch.arange(flat_positions.shape[0], device=grid.device, dtype=index_grid.dtype)
@@ -249,15 +269,19 @@ def snapshot_combat_step_tensors_rebuild_grid(
     base_logits = torch.bmm(selected_base_weight_2, hidden.unsqueeze(2)).squeeze(2)
     rank1_logit_scale = (hidden * selected_v_2).sum(dim=1) * coeff_2
     logits = stabilize_logits(base_logits + rank1_logit_scale.unsqueeze(1) * selected_u_2 + bias_2)
-    actions = logits.argmax(dim=1)
+    actions = packed_actions_from_logits(logits)
 
-    target_flat_positions = flat_positions + direction_flat_deltas[actions]
+    directions = action_directions(actions)
+    attack_intents = action_attack_intents(actions)
+    target_flat_positions = flat_positions + direction_flat_deltas[directions]
     target_indices = index_grid.reshape(-1)[target_flat_positions]
     active = health > 0
-    moving = active & (actions != 0)
-    hits_border = moving & (target_indices == -2)
-    hits_empty = moving & (target_indices == -1)
-    hits_occupied = moving & (target_indices >= 0)
+    targeted = active & (directions != 0)
+    move_intents = targeted & ~attack_intents
+    attack_intents = targeted & attack_intents
+    hits_border = move_intents & (target_indices == -2)
+    hits_empty = move_intents & (target_indices == -1)
+    hits_occupied = attack_intents & (target_indices >= 0)
 
     valid_targets = target_indices.clamp_min(0).to(torch.long)
     attacker_indices = torch.arange(flat_positions.shape[0], device=grid.device, dtype=index_grid.dtype)
@@ -350,15 +374,19 @@ def snapshot_combat_step_tensors_family_basis_rebuild_grid(
     selected_u_2 = u_2[family_index]
     rank1_logit_scale = (hidden * selected_v_2).sum(dim=1) * coeff_2
     logits = stabilize_logits(base_logits + rank1_logit_scale.unsqueeze(1) * selected_u_2 + bias_2)
-    actions = logits.argmax(dim=1)
+    actions = packed_actions_from_logits(logits)
 
-    target_flat_positions = flat_positions + direction_flat_deltas[actions]
+    directions = action_directions(actions)
+    attack_intents = action_attack_intents(actions)
+    target_flat_positions = flat_positions + direction_flat_deltas[directions]
     target_indices = index_flat[target_flat_positions]
     active = health > 0
-    moving = active & (actions != 0)
-    hits_border = moving & (target_indices == -2)
-    hits_empty = moving & (target_indices == -1)
-    hits_occupied = moving & (target_indices >= 0)
+    targeted = active & (directions != 0)
+    move_intents = targeted & ~attack_intents
+    attack_intents = targeted & attack_intents
+    hits_border = move_intents & (target_indices == -2)
+    hits_empty = move_intents & (target_indices == -1)
+    hits_occupied = attack_intents & (target_indices >= 0)
 
     valid_targets = target_indices.clamp_min(0).to(torch.long)
     attack_damage = snapshot_attack_damage(
@@ -1007,7 +1035,7 @@ class TensorRank1State:
         logits.add_(self.bias_2)
         logits = stabilize_logits(logits)
         self.recurrent_state = hidden
-        return logits.argmax(dim=1)
+        return packed_actions_from_logits(logits)
 
     def refresh_single_active_family(self):
         if self.cells == 0:
@@ -1039,9 +1067,10 @@ class TensorRank1State:
 
     def apply_snapshot_movement(self, actions, sync_positions=True):
         old_flat_positions = self.flat_positions
-        target_flat_positions = self.flat_positions + self.direction_flat_deltas[actions]
+        directions = action_directions(actions)
+        target_flat_positions = self.flat_positions + self.direction_flat_deltas[directions]
         target_indices = self.index_grid.reshape(-1)[target_flat_positions]
-        can_move = (actions != 0) & (target_indices == -1)
+        can_move = (directions != 0) & (target_indices == -1) & ~action_attack_intents(actions)
         self.flat_positions = torch.where(can_move, target_flat_positions, self.flat_positions)
         if sync_positions:
             self.sync_positions_from_flat()
@@ -1095,13 +1124,17 @@ class TensorRank1State:
             return
 
         old_flat_positions = self.flat_positions
-        target_flat_positions = self.flat_positions + self.direction_flat_deltas[actions]
+        directions = action_directions(actions)
+        attack_intents = action_attack_intents(actions)
+        target_flat_positions = self.flat_positions + self.direction_flat_deltas[directions]
         target_indices = self.index_grid.reshape(-1)[target_flat_positions]
         active = self.alive_mask()
-        moving = active & (actions != 0)
-        hits_border = moving & (target_indices == -2)
-        hits_empty = moving & (target_indices == -1)
-        hits_occupied = moving & (target_indices >= 0)
+        targeted = active & (directions != 0)
+        move_intents = targeted & ~attack_intents
+        attack_intents = targeted & attack_intents
+        hits_border = move_intents & (target_indices == -2)
+        hits_empty = move_intents & (target_indices == -1)
+        hits_occupied = attack_intents & (target_indices >= 0)
         valid_targets = target_indices.clamp_min(0).to(torch.long)
         attacker_indices = self.index_grid_indices()
         attack_damage = snapshot_attack_damage(
