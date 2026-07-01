@@ -42,34 +42,36 @@ def test_init_caps_spawn_count_to_available_positions():
     assert len(npd.empty_positions(game)) == 0
 
 
-def test_initial_empty_game_spawn_keeps_random_independent_genes(monkeypatch):
+def test_initial_empty_game_spawn_uses_one_rank1_family(monkeypatch):
     game = npd.Game(size=(6, 6))
 
     def fail_mutate(_game, _cell):
-        raise AssertionError('empty initial spawn should not mutate from the first cell')
+        raise AssertionError('initial rank-1 wave should not mutate from an existing cell')
 
     monkeypatch.setattr(npd.Game, 'mutate', fail_mutate)
 
     npd.init(game, num=8)
 
     assert len(game.cells) == 8
+    assert len({cell.rank1_family for cell in game.cells}) == 1
 
 
-def test_wave_spawn_mutates_only_preexisting_cell_count(monkeypatch):
+def test_wave_spawn_uses_hp_weighted_family_not_per_cell_mutate(monkeypatch):
     game = npd.Game(size=(6, 6))
     game.add_cell(2, 2)
-    mutate_calls = []
+    survivor = game.get_cell(2, 2)
+    survivor.rank1_family = npd.SharedRank1Family(survivor.get_genes())
 
-    def count_mutate(_game, cell):
-        mutate_calls.append(cell)
-        return cell.get_genes()
+    def fail_mutate(_game, _cell):
+        raise AssertionError('rank-1 refill waves should come from one weighted family')
 
-    monkeypatch.setattr(npd.Game, 'mutate', count_mutate)
+    monkeypatch.setattr(npd.Game, 'mutate', fail_mutate)
 
     npd.init(game, num=5)
 
     assert len(game.cells) == 6
-    assert len(mutate_calls) == 1
+    new_cells = [cell for cell in game.cells if cell is not survivor]
+    assert len({cell.rank1_family for cell in new_cells}) == 1
 
 
 def test_random_spawn_raises_when_grid_is_full():
@@ -163,6 +165,7 @@ def test_mutation_uses_actual_neighbor_positions(monkeypatch):
         neighbor.linear2.bias.fill_(40)
 
     monkeypatch.setattr(npd.np.random, 'rand', lambda: 0.0)
+    monkeypatch.setattr(npd.np.random, 'randn', lambda: 0.0)
     monkeypatch.setattr(npd.torch, 'randn_like', lambda tensor: torch.zeros_like(tensor))
 
     genes = game.mutate(parent)
@@ -171,48 +174,144 @@ def test_mutation_uses_actual_neighbor_positions(monkeypatch):
     assert torch.allclose(genes['bias_1'], torch.full_like(parent.linear.bias, 4.0))
     assert torch.allclose(genes['weight_2'], torch.full_like(parent.linear2.weight, 6.0))
     assert torch.allclose(genes['bias_2'], torch.full_like(parent.linear2.bias, 8.0))
+    assert torch.allclose(genes['_rank1_family'].base_weight_1, torch.full_like(parent.linear.weight, 2.0))
+    assert torch.allclose(genes['_rank1_family'].base_weight_2, torch.full_like(parent.linear2.weight, 6.0))
 
 
-def test_structured_matrix_noise_is_low_rank():
+def test_shared_rank1_family_direction_is_rank1_with_controlled_scale():
     npd.seed_all(123)
-    matrix = torch.zeros(9, 33)
+    family = npd.SharedRank1Family()
 
-    noise = npd.structured_noise_like(matrix, scale=1.0, rank=2)
+    direction = torch.outer(family.u_1, family.v_1)
 
-    assert noise.shape == matrix.shape
-    assert not torch.allclose(noise, torch.zeros_like(noise))
-    assert torch.linalg.matrix_rank(noise, tol=1e-5).item() <= 2
+    assert direction.shape == family.base_weight_1.shape
+    assert not torch.allclose(direction, torch.zeros_like(direction))
+    assert torch.linalg.matrix_rank(direction, tol=1e-5).item() <= 1
+    assert torch.isclose(direction.square().mean().sqrt(), torch.tensor(1.0), atol=1e-5)
 
 
-def test_light_mutation_preserves_original_second_random_draw(monkeypatch):
+def test_factored_initial_wave_uses_one_compatible_family():
+    npd.seed_all(123)
+    game = npd.Game(size=(8, 8), mutation_mode=npd.MUTATION_MODE_SHARED_RANK1_FACTORED)
+
+    npd.init(game, num=8)
+
+    families = {id(cell.rank1_family) for cell in game.cells}
+    assert len(families) == 1
+    for cell in game.cells:
+        expected_weight_1 = cell.rank1_family.materialize_weight_1(cell.rank1_coeff_1)
+        expected_weight_2 = cell.rank1_family.materialize_weight_2(cell.rank1_coeff_2)
+        assert torch.allclose(cell.linear.weight, expected_weight_1)
+        assert torch.allclose(cell.linear2.weight, expected_weight_2)
+
+
+def test_factored_wave_cells_share_family_base_biases():
+    npd.seed_all(123)
+    game = npd.Game(size=(8, 8), mutation_mode=npd.MUTATION_MODE_SHARED_RANK1_FACTORED)
+
+    npd.init(game, num=8)
+
+    family = game.cells[0].rank1_family
+    assert all(cell.linear.bias is family.base_bias_1 for cell in game.cells)
+    assert all(cell.linear2.bias is family.base_bias_2 for cell in game.cells)
+
+
+def test_factored_refill_wave_creates_new_family_without_reassigning_survivors():
+    npd.seed_all(123)
+    game = npd.Game(size=(10, 10), mutation_mode=npd.MUTATION_MODE_SHARED_RANK1_FACTORED)
+    npd.init(game, num=4)
+    survivors = list(game.cells)
+    survivor_family = survivors[0].rank1_family
+    for index, cell in enumerate(survivors, start=1):
+        cell.health = index
+    weights = torch.tensor([cell.health for cell in survivors], dtype=torch.float32)
+    weights = weights / weights.sum()
+    expected_base_weight_1 = sum(cell.linear.weight * weights[index] for index, cell in enumerate(survivors))
+    expected_base_weight_2 = sum(cell.linear2.weight * weights[index] for index, cell in enumerate(survivors))
+
+    npd.init(game, num=4)
+
+    assert {cell.rank1_family for cell in survivors} == {survivor_family}
+    refill_cells = [cell for cell in game.cells if cell not in survivors]
+    assert len(refill_cells) == 4
+    refill_families = {cell.rank1_family for cell in refill_cells}
+    assert len(refill_families) == 1
+    assert survivor_family not in refill_families
+    refill_family = refill_cells[0].rank1_family
+    assert torch.allclose(refill_family.base_weight_1, expected_base_weight_1)
+    assert torch.allclose(refill_family.base_weight_2, expected_base_weight_2)
+
+
+def test_family_batched_actions_match_dense_cell_forward():
+    npd.seed_all(123)
+    game = npd.Game(
+        size=(12, 12),
+        mutation_mode=npd.MUTATION_MODE_SHARED_RANK1_FACTORED,
+        action_backend=npd.ACTION_BACKEND_FAMILY_BATCHED,
+        action_device='cpu',
+        batched_min_family_size=1,
+    )
+    npd.init(game, num=12)
+    cells = list(game.cells)
+
+    planned = npd.planned_family_actions(game, cells)
+
+    assert len(planned) == len(cells)
+    for cell in cells:
+        y, x = cell.pos
+        neighbors = game.grid[y-2:y+3, x-2:x+3].reshape(-1)
+        dense_action = cell.forward_neighbors25(neighbors)
+        batched_action, batched_hidden = planned[id(cell)]
+        assert batched_action == dense_action
+        assert npd.np.allclose(batched_hidden, cell.prev_state, atol=1e-6)
+
+
+def test_packed_family_actions_match_dense_cell_forward_with_multiple_families():
+    npd.seed_all(456)
+    game = npd.Game(
+        size=(12, 12),
+        mutation_mode=npd.MUTATION_MODE_SHARED_RANK1_FACTORED,
+        action_backend=npd.ACTION_BACKEND_FAMILY_BATCHED,
+        action_device='cpu',
+        batched_min_family_size=1,
+    )
+    npd.init(game, num=12)
+    cells = list(game.cells)
+    for cell in cells[:4]:
+        cell.rank1_family = npd.SharedRank1Family(cell.get_genes())
+        cell.rank1_coeff_1 = 0.0
+        cell.rank1_coeff_2 = 0.0
+
+    planned = npd.planned_family_action_list(game, cells)
+
+    assert len(planned) == len(cells)
+    assert len({cell.rank1_family for cell in cells}) > 1
+    for planned_index, cell in enumerate(cells):
+        y, x = cell.pos
+        neighbors = game.grid[y-2:y+3, x-2:x+3].reshape(-1)
+        dense_action = cell.forward_neighbors25(neighbors)
+        packed_action, packed_hidden = planned[planned_index]
+        assert packed_action == dense_action
+        assert npd.np.allclose(packed_hidden, cell.prev_state, atol=1e-6)
+
+
+def test_light_rank1_mutation_keeps_family_and_moves_coefficients(monkeypatch):
     cell = npd.Cell([3, 3])
+    family = npd.SharedRank1Family(cell.get_genes())
+    cell.rank1_family = family
     game = npd.Game(size=(6, 6))
     rolls = iter([0.5, 0.0])
     monkeypatch.setattr(npd.np.random, 'rand', lambda: next(rolls))
+    monkeypatch.setattr(npd.np.random, 'randn', lambda: 1.0)
     monkeypatch.setattr(npd.torch, 'randn_like', lambda tensor: torch.ones_like(tensor))
 
     genes = game.mutate(cell)
 
-    matrix_delta = 0.00001 * npd.LOW_RANK_MUTATION_RANK ** 0.5
-    assert torch.allclose(genes['weight_1'], cell.linear.weight + matrix_delta)
-    assert torch.allclose(genes['bias_1'], cell.linear.bias + 0.00001)
-    assert torch.allclose(genes['weight_2'], cell.linear2.weight + matrix_delta)
-    assert torch.allclose(genes['bias_2'], cell.linear2.bias + 0.00001)
-
-
-def test_legacy_mutation_mode_uses_dense_noise(monkeypatch):
-    cell = npd.Cell([3, 3])
-    game = npd.Game(size=(6, 6), mutation_mode=npd.MUTATION_MODE_LEGACY)
-    rolls = iter([0.5, 0.0])
-    monkeypatch.setattr(npd.np.random, 'rand', lambda: next(rolls))
-    monkeypatch.setattr(npd.torch, 'randn_like', lambda tensor: torch.ones_like(tensor))
-
-    genes = game.mutate(cell)
-
-    assert torch.allclose(genes['weight_1'], cell.linear.weight + 0.00001)
-    assert torch.allclose(genes['bias_1'], cell.linear.bias + 0.00001)
-    assert torch.allclose(genes['weight_2'], cell.linear2.weight + 0.00001)
-    assert torch.allclose(genes['bias_2'], cell.linear2.bias + 0.00001)
+    assert genes['_rank1_family'] is family
+    assert genes['_rank1_coeff_1'] == cell.rank1_coeff_1 + game.mutate_rate
+    assert genes['_rank1_coeff_2'] == cell.rank1_coeff_2 + game.mutate_rate
+    assert torch.allclose(genes['weight_1'], family.materialize_weight_1(genes['_rank1_coeff_1']))
+    assert torch.allclose(genes['bias_1'], cell.linear.bias + game.mutate_rate)
 
 
 def test_shared_rank1_spawn_uses_one_base_per_wave():
@@ -378,6 +477,39 @@ def test_video_renderer_writes_artifact_and_manifest(tmp_path):
     assert 'rendered_rounds: 0,2' in manifest_text
 
 
+def test_normal_play_benchmark_exposes_tensor_engine_and_rejects_cpu():
+    script = Path(__file__).resolve().parents[1] / 'scripts' / 'benchmark_normal_play.py'
+    help_result = subprocess.run(
+        [sys.executable, str(script), '--help'],
+        capture_output=True,
+        text=True,
+        timeout=20,
+    )
+
+    assert help_result.returncode == 0, help_result.stderr
+    assert '--engine {game,tensor_rank1}' in help_result.stdout
+    assert '--tensor-family-capacity' in help_result.stdout
+
+    cpu_result = subprocess.run(
+        [
+            sys.executable,
+            str(script),
+            '--engine',
+            'tensor_rank1',
+            '--action-device',
+            'cpu',
+            '--rounds',
+            '1',
+        ],
+        capture_output=True,
+        text=True,
+        timeout=20,
+    )
+
+    assert cpu_result.returncode == 2
+    assert '--engine tensor_rank1 requires --action-device cuda' in cpu_result.stderr
+
+
 def test_mutation_comparison_writes_csv_plot_and_videos(tmp_path):
     script = Path(__file__).resolve().parent / 'compare_mutation_modes.py'
     result = subprocess.run(
@@ -424,5 +556,4 @@ def test_mutation_comparison_writes_csv_plot_and_videos(tmp_path):
 
     csv_text = (tmp_path / 'survival_rounds_2.csv').read_text(encoding='utf-8')
     assert 'mutation_mode,round,previous_round_cells,pre_refill_cells,post_refill_cells' in csv_text
-    assert 'legacy,0,' in csv_text
-    assert 'low_rank,0,' in csv_text
+    assert 'shared_rank1_factored,0,' in csv_text

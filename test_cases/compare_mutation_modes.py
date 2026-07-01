@@ -22,7 +22,7 @@ def positive_int(value):
 
 
 def parse_args():
-    parser = argparse.ArgumentParser(description='Compare legacy and low-rank mutation dynamics.')
+    parser = argparse.ArgumentParser(description='Record shared rank-1 mutation dynamics.')
     parser.add_argument('--output-dir', default='test_cases/artifacts/mutation_comparison')
     parser.add_argument('--rounds', type=positive_int, default=100)
     parser.add_argument('--render-every-rounds', type=positive_int, default=10)
@@ -34,7 +34,6 @@ def parse_args():
     parser.add_argument('--status-height', type=positive_int, default=34)
     parser.add_argument('--roundtime', type=positive_int, default=npd.ROUNDTIME)
     parser.add_argument('--modes', nargs='+', choices=npd.MUTATION_MODES, default=list(npd.MUTATION_MODES))
-    parser.add_argument('--action-mode', choices=npd.ACTION_MODES, default=npd.DEFAULT_ACTION_MODE)
     return parser.parse_args()
 
 
@@ -114,7 +113,6 @@ def write_video_manifest(path, args, mode, frames_written, rounds_rendered):
         f'size: {size.lines}x{size.columns}',
         f'initial_cells: {args.initial_cells}',
         f'seed: {args.seed}',
-        f'action_mode: {args.action_mode}',
         f'roundtime: {args.roundtime}',
         f'frames_written: {frames_written}',
         f'rendered_rounds: {",".join(str(round_num) for round_num in rounds_rendered)}',
@@ -127,7 +125,7 @@ def run_mode(args, mode, output_dir):
     npd.seed_all(args.seed)
     npd.ROUNDTIME = args.roundtime
 
-    game = npd.init(npd.Game(size=args.size, mutation_mode=mode, action_mode=args.action_mode), num=args.initial_cells)
+    game = npd.init(npd.Game(size=args.size, mutation_mode=mode), num=args.initial_cells)
     countdown = npd.ROUNDTIME
     font = ImageFont.load_default()
     rounds_to_render = set(selected_rounds(args.rounds, args.render_every_rounds))
@@ -139,7 +137,7 @@ def run_mode(args, mode, output_dir):
     metrics.append(row)
 
     video_path = output_dir / f'{mode}_rounds_{args.rounds}_every_{args.render_every_rounds}.mp4'
-    with torch.no_grad(), imageio.get_writer(video_path, fps=args.fps, macro_block_size=1) as writer:
+    with torch.inference_mode(), imageio.get_writer(video_path, fps=args.fps, macro_block_size=1) as writer:
         while game.rounds < args.rounds:
             game = ensure_cells(game)
             if game.rounds in rounds_to_render:
@@ -242,11 +240,7 @@ def draw_panel(draw, box, rows_by_mode, metric, title, y_min, y_max, colors, fon
 def write_plot(path, rows, rounds):
     plot_rows = [row for row in rows if int(row['round']) > 0] or rows
     rows_by_mode = by_mode(plot_rows)
-    colors = {
-        npd.MUTATION_MODE_LEGACY: (45, 105, 190),
-        npd.MUTATION_MODE_LOW_RANK: (210, 115, 34),
-        npd.MUTATION_MODE_SHARED_RANK1: (90, 145, 70),
-    }
+    colors = {npd.MUTATION_MODE_SHARED_RANK1_FACTORED: (130, 86, 180)}
     image = Image.new('RGB', (1200, 760), (248, 250, 252))
     draw = ImageDraw.Draw(image)
     font = ImageFont.load_default()

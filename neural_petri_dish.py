@@ -1,6 +1,5 @@
 import numpy as np
 import torch
-import torch.nn as nn
 import argparse
 import os
 from pathlib import Path
@@ -9,6 +8,15 @@ import random
 import shutil
 import sys
 import time
+
+from rank1_genome import (
+    FACTORED_WAVE_COEFF_SCALE,
+    LinearGenes,
+    SharedRank1Family,
+    factored_gene_batch,
+    factored_gene_tensors,
+    factored_genes,
+)
 
 try:
     from sty import fg, bg
@@ -85,14 +93,6 @@ def seed_all(seed):
     torch.manual_seed(seed)
 
 
-def clone_parameter(tensor):
-    return nn.Parameter(tensor.detach().clone())
-
-
-def clone_genes(genes):
-    return {key: value.detach().clone() for key, value in genes.items()}
-
-
 def empty_positions(game):
     play_area = game.grid[2:game.size.lines, 2:game.size.columns + 2]
     positions = np.argwhere(play_area == 0)
@@ -103,17 +103,27 @@ col = 16
 X = f'{bg(col)}❏{bg.rs}'# the icon for the cell *·◉ ○ ●○○✺✺
 BLANK = f'{bg(col)} {bg.rs}' # icon for empty cell °
 FRAME_RATE = 0.05    # seconds between frames
-MUTATION_MODE_LEGACY = 'legacy'
-MUTATION_MODE_LOW_RANK = 'low_rank'
-MUTATION_MODE_SHARED_RANK1 = 'shared_rank1'
-MUTATION_MODES = (MUTATION_MODE_LEGACY, MUTATION_MODE_LOW_RANK, MUTATION_MODE_SHARED_RANK1)
-DEFAULT_MUTATION_MODE = MUTATION_MODE_LOW_RANK
-LOW_RANK_MUTATION_RANK = 2
-SHARED_RANK1_PERTURBATION_SCALE = 0.03
-ACTION_MODE_SEQUENTIAL = 'sequential'
-ACTION_MODE_SIMULTANEOUS = 'simultaneous'
-ACTION_MODES = (ACTION_MODE_SEQUENTIAL, ACTION_MODE_SIMULTANEOUS)
-DEFAULT_ACTION_MODE = ACTION_MODE_SEQUENTIAL
+MUTATION_MODE_SHARED_RANK1_FACTORED = 'shared_rank1_factored'
+MUTATION_MODES = (MUTATION_MODE_SHARED_RANK1_FACTORED,)
+DEFAULT_MUTATION_MODE = MUTATION_MODE_SHARED_RANK1_FACTORED
+ACTION_BACKEND_SEQUENTIAL = 'sequential'
+ACTION_BACKEND_FAMILY_BATCHED = 'family_batched'
+ACTION_BACKENDS = (ACTION_BACKEND_SEQUENTIAL, ACTION_BACKEND_FAMILY_BATCHED)
+DIRECTION_DELTAS = (
+    (0, 0),   # stationary
+    (-1, 0),  # up
+    (1, 0),   # down
+    (0, 1),   # right
+    (0, -1),  # left
+    (-1, 1),  # up right
+    (-1, -1), # up left
+    (1, 1),   # down right
+    (1, -1),  # down left
+)
+NEIGHBOR_OFFSETS = np.array(
+    [(dy, dx) for dy in range(-2, 3) for dx in range(-2, 3) if not (dy == 0 and dx == 0)],
+    dtype=np.int64,
+)
 
 direction_dict = {
     0: lambda yx: np.array(yx), #stationary
@@ -127,66 +137,119 @@ direction_dict = {
     8: lambda yx: np.array([yx[0]+1, yx[1]-1]) # down left
 }
 
-class Cell(nn.Module):
+class Cell:
     '''
     Manages each cell, it's genes and it's neural network
     '''
-    def __init__(self, pos, genes=None):
-        super(Cell, self).__init__()
-        self.linear = nn.Linear(33, 9)
-        self.relu = nn.ReLU()
-        self.linear2 = nn.Linear(9, 9)
-        self.pos = list(pos)
+    def __init__(self, pos, genes=None, initialize_genes=True):
+        if genes is None and initialize_genes:
+            self.linear = LinearGenes(33, 9)
+            self.linear2 = LinearGenes(9, 9)
+        elif genes is not None:
+            self.linear = LinearGenes(
+                weight=genes['weight_1'],
+                bias=genes['bias_1'],
+                clone_weight=genes.get('_clone_weight_1', True),
+                clone_bias=genes.get('_clone_bias_1', True),
+            )
+            self.linear2 = LinearGenes(
+                weight=genes['weight_2'],
+                bias=genes['bias_2'],
+                clone_weight=genes.get('_clone_weight_2', True),
+                clone_bias=genes.get('_clone_bias_2', True),
+            )
+        else:
+            self.linear = None
+            self.linear2 = None
+        self.input_buffer = np.zeros(33, dtype=np.float32)
+        self.hidden_buffer = np.zeros(9, dtype=np.float32)
+        self.output_buffer = np.zeros(9, dtype=np.float32)
+        self.y = int(pos[0])
+        self.x = int(pos[1])
+        self.pos = [self.y, self.x]
         self.health = 2
         self.max_health = 15
         self.age = 0
-        self.prev_state = None
+        self.prev_state = np.zeros(9, dtype=np.float32)
         self.diversity = None
+        self.rank1_family = None
+        self.rank1_coeff_1 = 0.0
+        self.rank1_coeff_2 = 0.0
 
         self.pos_list = []
-        self.genome_mode = 'full'
-        self.base_id = None
-        self.shared_base = None
-        self.rank1 = None
 
         if genes is not None:
-            self.genome_mode = genes.get('genome_mode', 'full')
-            self.base_id = genes.get('base_id')
-            if self.genome_mode == MUTATION_MODE_SHARED_RANK1:
-                self.shared_base = clone_genes(genes['shared_base'])
-                self.rank1 = clone_genes(genes['rank1'])
-            self.linear.weight = clone_parameter(genes['weight_1'])
-            self.linear.bias = clone_parameter(genes['bias_1'])
-            self.linear2.weight = clone_parameter(genes['weight_2'])
-            self.linear2.bias = clone_parameter(genes['bias_2'])
+            self.rank1_family = genes.get('_rank1_family')
+            self.rank1_coeff_1 = float(genes.get('_rank1_coeff_1', 0.0))
+            self.rank1_coeff_2 = float(genes.get('_rank1_coeff_2', 0.0))
 
-    def update_position_history(self):
-        self.pos_list.append(self.pos)
+    def forward(self, neighbors):
+        if isinstance(neighbors, torch.Tensor):
+            neighbors = neighbors.detach().cpu().numpy()
+        return self.forward_neighbors(neighbors)
+
+    def forward_neighbors(self, neighbors):
+        neighbors = neighbors.reshape(-1)
+        buffer = self.input_buffer
+        if neighbors.shape[0] == 25:
+            buffer[:12] = neighbors[:12]
+            buffer[12:24] = neighbors[13:]
+        else:
+            buffer[:24] = neighbors
+        return self.forward_from_input_buffer()
+
+    def forward_neighbors25(self, neighbors):
+        flat = neighbors.reshape(25)
+        return self.forward_flat_neighbors25(flat)
+
+    def forward_flat_neighbors25(self, flat):
+        buffer = self.input_buffer
+        buffer[:12] = flat[:12]
+        buffer[12:24] = flat[13:]
+        buffer[24:] = self.prev_state
+        hidden = self.hidden_buffer
+        output = self.output_buffer
+        np.dot(self.linear.weight_np, buffer, out=hidden)
+        hidden += self.linear.bias_np
+        np.maximum(hidden, 0, out=hidden)
+        self.commit_forward_state(hidden)
+        np.dot(self.linear2.weight_np, hidden, out=output)
+        output += self.linear2.bias_np
+        return int(output.argmax())
+
+    def forward_from_input_buffer(self):
+        buffer = self.input_buffer
+        buffer[24:] = self.prev_state
+        hidden = self.hidden_buffer
+        output = self.output_buffer
+        np.dot(self.linear.weight_np, buffer, out=hidden)
+        hidden += self.linear.bias_np
+        np.maximum(hidden, 0, out=hidden)
+        self.commit_forward_state(hidden)
+        np.dot(self.linear2.weight_np, hidden, out=output)
+        output += self.linear2.bias_np
+        return int(output.argmax())
+
+    def commit_forward_state(self, hidden):
+        self.prev_state[:] = hidden
+
+        current_pos = (self.y, self.x)
+        self.pos_list.append(current_pos)
+        if len(self.pos_list) > 5:
+            del self.pos_list[:-5]
         if len(self.pos_list) > 1:
             same_count = 0
             for el in self.pos_list[-5:-2]:
-                if el == self.pos:
+                if el == current_pos:
                     same_count += 1
             if same_count > 1: # if the cell has been in the same location for 3 frames, its health goes to 1 # NOW 1
                 self.health = 1
                 self.pos_list = []
 
-    def forward(self, neighbors):
-        inps = neighbors.unsqueeze(0)
-        if self.prev_state is not None:
-            all_imps = torch.cat((inps, self.prev_state), dim=-1)
-        else:
-            state = torch.zeros(1, 1, 9, dtype=inps.dtype, device=inps.device)
-            all_imps = torch.cat((inps, state), dim=-1)
-        lin1 = self.relu(self.linear(all_imps))
-        self.prev_state = lin1.detach()
-        lin2 = self.linear2(lin1)
-
-        self.update_position_history()
-        return lin2.argmax()
-
     def update_pos(self, pos):
-        self.pos = pos.tolist() if isinstance(pos, np.ndarray) else list(pos)
+        self.y = int(pos[0])
+        self.x = int(pos[1])
+        self.pos = [self.y, self.x]
                     
             
 
@@ -202,12 +265,17 @@ class Cell(nn.Module):
         self.health = min(self.max_health, self.health + amount)
 
     def total_parameters(self):
-        return sum(p.numel() for p in self.parameters() if p.requires_grad)
+        return (
+            self.linear.weight.numel()
+            + self.linear.bias.numel()
+            + self.linear2.weight.numel()
+            + self.linear2.bias.numel()
+        )
 
 
-def random_spawn(game):
+def random_spawn(game, check_available=True):
     '''returns a random position in the grid that is not occupied'''
-    if len(empty_positions(game)) == 0:
+    if check_available and len(empty_positions(game)) == 0:
         raise RuntimeError('No Empty Positions Available')
     # Keep the original rejection-sampling draw order so seeded runs match the
     # interactive simulation as closely as possible. The pre-check only prevents
@@ -218,164 +286,101 @@ def random_spawn(game):
             return pos
 
 
-def structured_noise_like(tensor, scale, rank=LOW_RANK_MUTATION_RANK):
-    if tensor.ndim != 2:
-        return torch.randn_like(tensor) * scale
-
-    rank = min(rank, *tensor.shape)
-    left = torch.randn_like(tensor[:, :rank])
-    right = torch.randn_like(tensor[:rank, :])
-    # EGGROLL-style low-rank noise perturbs a weight matrix through a factored
-    # direction instead of independent noise at every parameter. The sqrt(rank)
-    # normalization keeps the entry scale close to ordinary Gaussian noise.
-    return left.matmul(right) * (scale / rank ** 0.5)
-
-
-def mutation_noise_like(tensor, scale, mode=DEFAULT_MUTATION_MODE):
-    if mode == MUTATION_MODE_LEGACY:
-        return torch.randn_like(tensor) * scale
-    if mode == MUTATION_MODE_LOW_RANK:
-        return structured_noise_like(tensor, scale)
-    raise ValueError(f'Unknown mutation mode: {mode}')
-
-
-def add_mutation_noise(tensor, scale, mode=DEFAULT_MUTATION_MODE):
-    return tensor + mutation_noise_like(tensor, scale, mode)
-
-
-def rank1_delta(u, v):
-    return u.unsqueeze(1).matmul(v.unsqueeze(0))
-
-
-def random_rank1_factors(base_genes, scale=SHARED_RANK1_PERTURBATION_SCALE):
-    return {
-        'weight_1_u': torch.randn(base_genes['weight_1'].shape[0]) * scale,
-        'weight_1_v': torch.randn(base_genes['weight_1'].shape[1]) / base_genes['weight_1'].shape[1] ** 0.5,
-        'bias_1_delta': torch.randn_like(base_genes['bias_1']) * scale,
-        'weight_2_u': torch.randn(base_genes['weight_2'].shape[0]) * scale,
-        'weight_2_v': torch.randn(base_genes['weight_2'].shape[1]) / base_genes['weight_2'].shape[1] ** 0.5,
-        'bias_2_delta': torch.randn_like(base_genes['bias_2']) * scale,
-    }
-
-
-def materialize_shared_rank1_genes(base_genes, rank1_factors):
-    return {
-        'weight_1': base_genes['weight_1'] + rank1_delta(rank1_factors['weight_1_u'], rank1_factors['weight_1_v']),
-        'bias_1': base_genes['bias_1'] + rank1_factors['bias_1_delta'],
-        'weight_2': base_genes['weight_2'] + rank1_delta(rank1_factors['weight_2_u'], rank1_factors['weight_2_v']),
-        'bias_2': base_genes['bias_2'] + rank1_factors['bias_2_delta'],
-    }
-
-
-def make_shared_rank1_genes(base_genes, base_id, scale=SHARED_RANK1_PERTURBATION_SCALE):
-    rank1_factors = random_rank1_factors(base_genes, scale)
-    genes = materialize_shared_rank1_genes(base_genes, rank1_factors)
-    genes.update({
-        'genome_mode': MUTATION_MODE_SHARED_RANK1,
-        'base_id': base_id,
-        'shared_base': clone_genes(base_genes),
-        'rank1': clone_genes(rank1_factors),
-    })
-    return genes
-
-
 class Game():
     '''
     Manages Game State
     '''
-    def __init__(self, genepool=None, size=None, mutation_mode=DEFAULT_MUTATION_MODE, action_mode=DEFAULT_ACTION_MODE):
+    def __init__(
+            self,
+            genepool=None,
+            size=None,
+            mutation_mode=DEFAULT_MUTATION_MODE,
+            action_backend=ACTION_BACKEND_SEQUENTIAL,
+            action_device='auto',
+            batched_min_family_size=32):
         self.size = terminal_size(size)
-        self.grid = np.zeros((self.size.lines+2, self.size.columns+4))
+        self.grid = np.zeros((self.size.lines+2, self.size.columns+4), dtype=np.float32)
         # set the 2 layer border as -1's (each cell has a vision of 4x4 hence border to avoid out of bounds)
         self.grid[:, 0:2] = -1
         self.grid[:, -2:] = -1
         self.grid[0:2, :] = -1
         self.grid[-2:, :] = -1
+        self._cell_key_stride = self.grid.shape[1]
         self.rounds = 0
         #
         self.cells = []
+        self.cells_by_pos = {}
         #self.graveyard = []
         self.mutate_rate = 0.00001
         self.mutation_mode = mutation_mode
-        self.action_mode = action_mode
-        self.shared_base_genes = None
-        self.shared_base_id = 0
+        self.action_backend = action_backend
+        self.action_device = action_device
+        self.batched_min_family_size = batched_min_family_size
+        self.defer_cell_list_removals = False
+        self.cells_removed_this_step = False
 
-    def ensure_shared_base(self):
-        if self.shared_base_genes is None:
-            self.shared_base_genes = clone_genes(Cell([2, 2]).get_genes())
-        return self.shared_base_genes
+    def _cell_key(self, y, x):
+        return int(y) * self._cell_key_stride + int(x)
 
-    def shared_rank1_genes(self, base_genes=None, base_id=None):
-        if base_genes is None:
-            base_genes = self.ensure_shared_base()
-        if base_id is None:
-            base_id = self.shared_base_id
-        return make_shared_rank1_genes(base_genes, base_id)
+    def _rebuild_cell_index(self):
+        self.cells_by_pos = {self._cell_key(cell.y, cell.x): cell for cell in self.cells}
+        return self.cells_by_pos
 
-    def update_shared_base_from_survivors(self):
-        if self.mutation_mode != MUTATION_MODE_SHARED_RANK1 or not self.cells:
-            return
-
-        total_health = sum(max(cell.health, 0) for cell in self.cells)
-        if total_health <= 0:
-            return
-
-        averaged = {}
-        for key in ('weight_1', 'bias_1', 'weight_2', 'bias_2'):
-            value = None
-            for cell in self.cells:
-                weight = max(cell.health, 0) / total_health
-                contribution = cell.get_genes()[key].detach() * weight
-                value = contribution if value is None else value + contribution
-            averaged[key] = value
-
-        self.shared_base_genes = averaged
-        self.shared_base_id += 1
+    def _cell_index(self):
+        if not hasattr(self, 'cells_by_pos'):
+            return self._rebuild_cell_index()
+        return self.cells_by_pos
 
     def get_cell(self, y, x):
-        cell = [c for c in self.cells if c.pos == [y, x]]
-        if len(cell) != 0:
-            return cell[0]
-        else:
-            return False
+        return self.cells_by_pos.get(int(y) * self._cell_key_stride + int(x), False)
 
     def update_cell(self, y, x, new, cell=None):
-        new = [int(new[0]), int(new[1])]
+        new_y = int(new[0])
+        new_x = int(new[1])
+        new = [new_y, new_x]
         if cell is None:
             cell = self.get_cell(y, x)
             if cell == False:
                 raise Exception('Cell Does not Exist at this Position')
-        occupant = self.get_cell(*new)
+        occupant = self.get_cell(new_y, new_x)
         if occupant is not False and occupant is not cell:
             raise Exception('New Position is Occupied')
-        if self.grid[new[0], new[1]] == -1:
+        if self.grid[new_y, new_x] == -1:
             raise Exception('New Position is Outside the Play Area')
        
+        old_key = int(y) * self._cell_key_stride + int(x)
+        new_key = new_y * self._cell_key_stride + new_x
         cell.update_pos(new)
-        self.grid[new[0], new[1]] = 1
+        self.grid[new_y, new_x] = 1
+        index = self.cells_by_pos
+        index.pop(old_key, None)
+        index[new_key] = cell
         if [y, x] != new:
             self.grid[y][x] = 0
 
     def remove_cell(self, y, x): 
         #self.graveyard.append(self.get_cell(y, x)) # change so cell is passed in
         self.grid[y, x] = 0
-        self.cells = [c for c in self.cells if c.pos != [y, x]]
+        cell = self.cells_by_pos.pop(int(y) * self._cell_key_stride + int(x), None)
+        if self.defer_cell_list_removals:
+            self.cells_removed_this_step = True
+            return
+        if cell is not None:
+            try:
+                self.cells.remove(cell)
+            except ValueError:
+                self._rebuild_cell_index()
 
-    def apply_damage(self, cell, amount=1):
-        if cell == False or cell not in self.cells:
+    def compact_cells(self):
+        index = self.cells_by_pos
+        stride = self._cell_key_stride
+        self.cells = [cell for cell in self.cells if index.get(cell.y * stride + cell.x) is cell]
+
+    def damage_cell(self, cell):
+        if cell == False or self.get_cell(*cell.pos) is not cell:
             return False
-        cell.health -= amount
-        return cell.health <= 0
-
-    def kill_cell(self, cell):
-        if cell == False or cell not in self.cells:
-            return False
-        self.remove_cell(*cell.pos)
-        return True
-
-    def damage_cell(self, cell, amount=1):
-        if self.apply_damage(cell, amount=amount):
+        cell.health -= 1
+        if cell.health <= 0:
             self.remove_cell(*cell.pos)
             return True
         return False
@@ -384,60 +389,105 @@ class Game():
         if self.grid[y][x] != 0:
             raise Exception('Cannot Add Cell to a Non-Empty Position')
         self.grid[y][x] = 1
-        self.cells.append(Cell([y, x], genes))
+        cell = Cell([y, x], genes)
+        self.cells.append(cell)
+        self.cells_by_pos[int(y) * self._cell_key_stride + int(x)] = cell
+
+    def add_factored_cell(self, y, x, family, coeff_1, coeff_2, weight_1, weight_2):
+        if self.grid[y][x] != 0:
+            raise Exception('Cannot Add Cell to a Non-Empty Position')
+        self.grid[y][x] = 1
+        cell = Cell([y, x], initialize_genes=False)
+        cell.linear = LinearGenes(weight=weight_1, bias=family.base_bias_1, clone_weight=False, clone_bias=False)
+        cell.linear2 = LinearGenes(weight=weight_2, bias=family.base_bias_2, clone_weight=False, clone_bias=False)
+        cell.rank1_family = family
+        cell.rank1_coeff_1 = float(coeff_1)
+        cell.rank1_coeff_2 = float(coeff_2)
+        self.cells.append(cell)
+        self.cells_by_pos[int(y) * self._cell_key_stride + int(x)] = cell
+
+    def make_factored_wave_family(self):
+        if len(self.cells) == 0:
+            return SharedRank1Family()
+        health = torch.tensor([max(cell.health, 0) for cell in self.cells], dtype=torch.float32)
+        if health.sum() <= 0:
+            health.fill_(1.0)
+        weights = health / health.sum()
+        weighted_genes = {}
+        for key in ('weight_1', 'bias_1', 'weight_2', 'bias_2'):
+            tensors = torch.stack([cell.get_genes()[key] for cell in self.cells])
+            view_shape = (len(self.cells),) + (1,) * (tensors.ndim - 1)
+            weighted_genes[key] = (tensors * weights.reshape(view_shape)).sum(dim=0)
+        return SharedRank1Family(weighted_genes)
+
+    def wave_factored_gene_batch(self, family, count):
+        return factored_gene_batch(family, count)
+
+    def wave_factored_tensors(self, family, count):
+        return factored_gene_tensors(family, count)
+
+    def mutate_factored(self, cell):
+        family = cell.rank1_family
+        if family is None:
+            family = SharedRank1Family(cell.get_genes())
+            cell.rank1_family = family
+            cell.rank1_coeff_1 = 0.0
+            cell.rank1_coeff_2 = 0.0
+
+        if np.random.rand() < 0.05:
+            y, x = cell.y, cell.x
+            ncells = []
+            for dy, dx in DIRECTION_DELTAS[1:]:
+                ncell = self.get_cell(y + dy, x + dx)
+                if ncell != False:
+                    ncells.append(ncell)
+            if len(ncells) != 0:
+                genes = [c.get_genes() for c in ncells]
+                new_genes = {}
+                for key in ('weight_1', 'bias_1', 'weight_2', 'bias_2'):
+                    new_genes[key] = torch.mean(torch.stack([g[key] for g in genes]), dim=0)
+                blended = {
+                    'weight_1': cell.linear.weight * 0.8 + new_genes['weight_1'] * 0.2,
+                    'bias_1': cell.linear.bias * 0.8 + new_genes['bias_1'] * 0.2,
+                    'weight_2': cell.linear2.weight * 0.8 + new_genes['weight_2'] * 0.2,
+                    'bias_2': cell.linear2.bias * 0.8 + new_genes['bias_2'] * 0.2,
+                }
+                new_family = SharedRank1Family(blended)
+                return factored_genes(
+                    new_family,
+                    np.random.randn() * 0.1,
+                    np.random.randn() * 0.1,
+                    blended['bias_1'],
+                    blended['bias_2'],
+                )
+            return factored_genes(
+                family,
+                cell.rank1_coeff_1 + np.random.randn() * 0.001,
+                cell.rank1_coeff_2 + np.random.randn() * 0.001,
+                cell.linear.bias + torch.randn_like(cell.linear.bias) * 0.001,
+                cell.linear2.bias + torch.randn_like(cell.linear2.bias) * 0.001,
+            )
+        elif np.random.rand() < 0.4:
+            return factored_genes(
+                family,
+                cell.rank1_coeff_1 + np.random.randn() * self.mutate_rate,
+                cell.rank1_coeff_2 + np.random.randn() * self.mutate_rate,
+                cell.linear.bias + torch.randn_like(cell.linear.bias) * self.mutate_rate,
+                cell.linear2.bias + torch.randn_like(cell.linear2.bias) * self.mutate_rate,
+            )
+        return factored_genes(
+            family,
+            cell.rank1_coeff_1,
+            cell.rank1_coeff_2,
+            cell.linear.bias,
+            cell.linear2.bias,
+        )
 
     def mutate(self, cell):
         '''
-        Mutates a cell's genes bashed on the surrounding cells
+        Mutates a cell's genes using the shared rank-1 family representation.
         '''
-        mutation_mode = getattr(self, 'mutation_mode', DEFAULT_MUTATION_MODE)
-        if mutation_mode == MUTATION_MODE_SHARED_RANK1:
-            base_genes = cell.shared_base if cell.shared_base is not None else self.ensure_shared_base()
-            base_id = cell.base_id if cell.base_id is not None else self.shared_base_id
-            return self.shared_rank1_genes(base_genes, base_id)
-
-        # 5% chance of larger mutation. In low_rank mode, matrix weights receive
-        # an EGGROLL-inspired factored perturbation; legacy mode preserves the
-        # old independent Gaussian noise for baseline comparisons.
-        
-        if np.random.rand() < 0.05:
-            # get the surrounding positions
-            neighbors = [direction_dict[i](cell.pos) for i in range(1,9)]
-            ncells = [self.get_cell(*n) for n in neighbors]
-            ncells = [c for c in ncells if c != False]
-            if len(ncells) != 0:
-                genes = [c.get_genes() for c in ncells]
-                # combine the genes 
-                new_genes = {}
-                for k in genes[0].keys():
-                    new_genes[k] = torch.mean(torch.stack([g[k] for g in genes]), dim=0)
-                # Blend local neighbor genes, then add a low-rank matrix
-                # perturbation so inherited policies shift coherently rather
-                # than by independent noise at every weight.
-                weight1 = add_mutation_noise(cell.linear.weight * 0.8 + new_genes['weight_1'] * 0.2, 0.1, mutation_mode)
-                bias1 = add_mutation_noise(cell.linear.bias * 0.8 + new_genes['bias_1'] * 0.2, 0.1, mutation_mode)
-                weight2 = add_mutation_noise(cell.linear2.weight * 0.8 + new_genes['weight_2'] * 0.2, 0.1, mutation_mode)
-                bias2 = add_mutation_noise(cell.linear2.bias * 0.8 + new_genes['bias_2'] * 0.2, 0.1, mutation_mode)
-            else:
-                weight1 = add_mutation_noise(cell.linear.weight, 0.001, mutation_mode)
-                bias1 = add_mutation_noise(cell.linear.bias, 0.001, mutation_mode)
-                weight2 = add_mutation_noise(cell.linear2.weight, 0.001, mutation_mode)
-                bias2 = add_mutation_noise(cell.linear2.bias, 0.001, mutation_mode)
-        # This intentionally remains a second RNG draw, matching the original
-        # probability path. Collapsing it into one draw changes seeded dynamics.
-        elif np.random.rand() < 0.4:
-            weight1 = add_mutation_noise(cell.linear.weight, 0.00001, mutation_mode)
-            bias1 = add_mutation_noise(cell.linear.bias, 0.00001, mutation_mode)
-            weight2 = add_mutation_noise(cell.linear2.weight, 0.00001, mutation_mode)
-            bias2 = add_mutation_noise(cell.linear2.bias, 0.00001, mutation_mode)
-        else:
-            # no mutation
-            weight1 = cell.linear.weight.detach().clone()
-            bias1 = cell.linear.bias.detach().clone()
-            weight2 = cell.linear2.weight.detach().clone()
-            bias2 = cell.linear2.bias.detach().clone()
-        return {'weight_1': weight1, 'bias_1': bias1,
-                'weight_2': weight2, 'bias_2': bias2}
+        return self.mutate_factored(cell)
 
 
 def render_grid(game, styled=True):
@@ -519,7 +569,6 @@ def advance_round(game, countdown):
     if countdown == 0:
         totalcells = len(game.cells)
         maxage = max([c.age for c in game.cells]) if game.cells else 0
-        game.update_shared_base_from_survivors()
         game = init(game, num=max(PER_WAVE - totalcells, MIN_WAVE))
         countdown = ROUNDTIME
         game.rounds += 1
@@ -533,248 +582,362 @@ def advance_round(game, countdown):
     return game, countdown
 
 
-def neighbor_tensor_for_cell(game, cell):
-    y, x = cell.pos
-    neighbors = np.delete(game.grid[y-2:y+3, x-2:x+3].reshape(-1), 12, 0)
-    if neighbors.shape[0] != 24:
-        raise RuntimeError(f'Expected 24 Neighbor Inputs, Got {neighbors.shape[0]}')
-    return torch.from_numpy(neighbors.astype(np.float32, copy=False))
+def resolve_action_device(name):
+    if name == 'auto':
+        return torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+    return torch.device(name)
 
 
-def batched_shared_rank1_actions(cells, neighbor_tensors):
-    inputs = []
-    for cell, neighbors in zip(cells, neighbor_tensors):
-        if cell.prev_state is None:
-            state = torch.zeros(9, dtype=neighbors.dtype, device=neighbors.device)
-        else:
-            state = cell.prev_state.reshape(-1).to(dtype=neighbors.dtype, device=neighbors.device)
-        inputs.append(torch.cat((neighbors, state), dim=-1))
-    x = torch.stack(inputs)
+def planned_packed_family_action_list(game, groups, device, cell_count):
+    families = list(groups)
+    packed_cells = []
+    planned_indices = []
+    family_indices = []
+    for family_index, family in enumerate(families):
+        group = groups[family]
+        for planned_index, cell in group:
+            packed_cells.append(cell)
+            planned_indices.append(planned_index)
+            family_indices.append(family_index)
 
-    base = cells[0].shared_base
-    w1 = base['weight_1'].to(dtype=x.dtype, device=x.device)
-    b1 = base['bias_1'].to(dtype=x.dtype, device=x.device)
-    w2 = base['weight_2'].to(dtype=x.dtype, device=x.device)
-    b2 = base['bias_2'].to(dtype=x.dtype, device=x.device)
+    if not packed_cells:
+        return None
 
-    u1 = torch.stack([cell.rank1['weight_1_u'].to(dtype=x.dtype, device=x.device) for cell in cells])
-    v1 = torch.stack([cell.rank1['weight_1_v'].to(dtype=x.dtype, device=x.device) for cell in cells])
-    b1_delta = torch.stack([cell.rank1['bias_1_delta'].to(dtype=x.dtype, device=x.device) for cell in cells])
-    hidden = x.matmul(w1.t()) + b1
-    hidden = hidden + (x * v1).sum(dim=1, keepdim=True) * u1 + b1_delta
-    hidden = torch.relu(hidden)
+    inputs = np.empty((len(packed_cells), 33), dtype=np.float32)
+    positions = np.asarray([(cell.y, cell.x) for cell in packed_cells], dtype=np.int64)
+    inputs[:, :24] = game.grid[
+        positions[:, 0, None] + NEIGHBOR_OFFSETS[None, :, 0],
+        positions[:, 1, None] + NEIGHBOR_OFFSETS[None, :, 1],
+    ]
+    inputs[:, 24:] = np.asarray([cell.prev_state for cell in packed_cells], dtype=np.float32)
+    coeff_1 = np.asarray([cell.rank1_coeff_1 for cell in packed_cells], dtype=np.float32)
+    coeff_2 = np.asarray([cell.rank1_coeff_2 for cell in packed_cells], dtype=np.float32)
+    bias_1 = np.asarray([cell.linear.bias_np for cell in packed_cells], dtype=np.float32)
+    bias_2 = np.asarray([cell.linear2.bias_np for cell in packed_cells], dtype=np.float32)
 
-    u2 = torch.stack([cell.rank1['weight_2_u'].to(dtype=x.dtype, device=x.device) for cell in cells])
-    v2 = torch.stack([cell.rank1['weight_2_v'].to(dtype=x.dtype, device=x.device) for cell in cells])
-    b2_delta = torch.stack([cell.rank1['bias_2_delta'].to(dtype=x.dtype, device=x.device) for cell in cells])
-    logits = hidden.matmul(w2.t()) + b2
-    logits = logits + (hidden * v2).sum(dim=1, keepdim=True) * u2 + b2_delta
+    cached = [family.tensors(device) for family in families]
+    base_weight_1 = torch.stack([item['base_weight_1'] for item in cached])
+    base_weight_2 = torch.stack([item['base_weight_2'] for item in cached])
+    u_1 = torch.stack([item['u_1'] for item in cached])
+    v_1 = torch.stack([item['v_1'] for item in cached])
+    u_2 = torch.stack([item['u_2'] for item in cached])
+    v_2 = torch.stack([item['v_2'] for item in cached])
 
-    for cell, state in zip(cells, hidden.detach()):
-        cell.prev_state = state.reshape(1, 1, -1)
-        cell.update_position_history()
-    return logits.argmax(dim=1).int().tolist()
+    input_tensor = torch.as_tensor(inputs, device=device)
+    family_index_tensor = torch.as_tensor(family_indices, device=device, dtype=torch.long)
+    coeff_1_tensor = torch.as_tensor(coeff_1, device=device)
+    coeff_2_tensor = torch.as_tensor(coeff_2, device=device)
+    bias_1_tensor = torch.as_tensor(bias_1, device=device)
+    bias_2_tensor = torch.as_tensor(bias_2, device=device)
+
+    if len(families) == 1:
+        base_hidden = input_tensor.matmul(base_weight_1[0].t())
+        rank1_hidden = (
+            input_tensor.matmul(v_1[0]) * coeff_1_tensor
+        ).unsqueeze(1) * u_1[0].unsqueeze(0)
+        hidden = base_hidden.add_(rank1_hidden).add_(bias_1_tensor).relu_()
+        base_logits = hidden.matmul(base_weight_2[0].t())
+        rank1_logits = (
+            hidden.matmul(v_2[0]) * coeff_2_tensor
+        ).unsqueeze(1) * u_2[0].unsqueeze(0)
+    else:
+        selected_base_weight_1 = base_weight_1[family_index_tensor]
+        selected_v_1 = v_1[family_index_tensor]
+        selected_u_1 = u_1[family_index_tensor]
+        base_hidden = torch.bmm(selected_base_weight_1, input_tensor.unsqueeze(2)).squeeze(2)
+        rank1_hidden = (
+            (input_tensor * selected_v_1).sum(dim=1) * coeff_1_tensor
+        ).unsqueeze(1) * selected_u_1
+        hidden = base_hidden.add_(rank1_hidden).add_(bias_1_tensor).relu_()
+
+        selected_base_weight_2 = base_weight_2[family_index_tensor]
+        selected_v_2 = v_2[family_index_tensor]
+        selected_u_2 = u_2[family_index_tensor]
+        base_logits = torch.bmm(selected_base_weight_2, hidden.unsqueeze(2)).squeeze(2)
+        rank1_logits = (
+            (hidden * selected_v_2).sum(dim=1) * coeff_2_tensor
+        ).unsqueeze(1) * selected_u_2
+    logits = base_logits.add_(rank1_logits).add_(bias_2_tensor)
+
+    actions = logits.argmax(dim=1).detach().cpu().numpy()
+    hidden_np = hidden.detach().cpu().numpy()
+    planned = [None] * cell_count
+    for index, planned_index in enumerate(planned_indices):
+        planned[planned_index] = (int(actions[index]), hidden_np[index])
+    return planned
 
 
-def compute_actions(game, cells):
-    actions = {}
-    grouped = {}
-    individual = []
-    for cell in cells:
-        if cell not in game.cells:
+def planned_grouped_family_action_list(game, groups, device, cell_count):
+    planned = [None] * cell_count
+    for family, group in groups.items():
+        group_cells = [cell for _planned_index, cell in group]
+        inputs = np.empty((len(group_cells), 33), dtype=np.float32)
+        positions = np.asarray([(cell.y, cell.x) for cell in group_cells], dtype=np.int64)
+        inputs[:, :24] = game.grid[
+            positions[:, 0, None] + NEIGHBOR_OFFSETS[None, :, 0],
+            positions[:, 1, None] + NEIGHBOR_OFFSETS[None, :, 1],
+        ]
+        inputs[:, 24:] = np.asarray([cell.prev_state for cell in group_cells], dtype=np.float32)
+        coeff_1 = np.asarray([cell.rank1_coeff_1 for cell in group_cells], dtype=np.float32)
+        coeff_2 = np.asarray([cell.rank1_coeff_2 for cell in group_cells], dtype=np.float32)
+        bias_1 = np.asarray([cell.linear.bias_np for cell in group_cells], dtype=np.float32)
+        bias_2 = np.asarray([cell.linear2.bias_np for cell in group_cells], dtype=np.float32)
+
+        family_tensors = family.tensors(device)
+        input_tensor = torch.as_tensor(inputs, device=device)
+        coeff_1_tensor = torch.as_tensor(coeff_1, device=device)
+        coeff_2_tensor = torch.as_tensor(coeff_2, device=device)
+        bias_1_tensor = torch.as_tensor(bias_1, device=device)
+        bias_2_tensor = torch.as_tensor(bias_2, device=device)
+
+        base_hidden = input_tensor.matmul(family_tensors['base_weight_1'].t())
+        rank1_hidden = (
+            input_tensor.matmul(family_tensors['v_1']) * coeff_1_tensor
+        ).unsqueeze(1) * family_tensors['u_1'].unsqueeze(0)
+        hidden = base_hidden.add_(rank1_hidden).add_(bias_1_tensor).relu_()
+        base_logits = hidden.matmul(family_tensors['base_weight_2'].t())
+        rank1_logits = (
+            hidden.matmul(family_tensors['v_2']) * coeff_2_tensor
+        ).unsqueeze(1) * family_tensors['u_2'].unsqueeze(0)
+        logits = base_logits.add_(rank1_logits).add_(bias_2_tensor)
+
+        actions = logits.argmax(dim=1).detach().cpu().numpy()
+        hidden_np = hidden.detach().cpu().numpy()
+        for index, (planned_index, _cell) in enumerate(group):
+            planned[planned_index] = (int(actions[index]), hidden_np[index])
+    return planned
+
+
+def planned_family_action_list(game, cells):
+    device = resolve_action_device(getattr(game, 'action_device', 'auto'))
+    min_family_size = getattr(game, 'batched_min_family_size', 32)
+    groups = {}
+    for planned_index, cell in enumerate(cells):
+        family = getattr(cell, 'rank1_family', None)
+        if family is None:
             continue
-        if cell.genome_mode == MUTATION_MODE_SHARED_RANK1 and cell.shared_base is not None and cell.rank1 is not None:
-            grouped.setdefault(cell.base_id, []).append(cell)
-        else:
-            individual.append(cell)
+        groups.setdefault(family, []).append((planned_index, cell))
 
-    for group in grouped.values():
-        neighbors = [neighbor_tensor_for_cell(game, cell) for cell in group]
-        for cell, action in zip(group, batched_shared_rank1_actions(group, neighbors)):
-            actions[id(cell)] = action
-
-    for cell in individual:
-        neighbor_tensor = neighbor_tensor_for_cell(game, cell).unsqueeze(0)
-        actions[id(cell)] = cell(neighbor_tensor).int().tolist()
-    return actions
+    groups = {family: group for family, group in groups.items() if len(group) >= min_family_size}
+    if not groups:
+        return None
+    if device.type == 'cuda':
+        return planned_packed_family_action_list(game, groups, device, len(cells))
+    return planned_grouped_family_action_list(game, groups, device, len(cells))
 
 
-def move_cell_if_open(game, cell, target):
-    if cell not in game.cells:
-        return False
-    if game.grid[target[0], target[1]] != 0:
-        return False
-    game.update_cell(*cell.pos, target, cell)
-    return True
-
-
-def resolve_successful_attack(game, attacker, victim):
-    if attacker not in game.cells or victim not in game.cells:
-        return False
-    attacker_origin = list(attacker.pos)
-    victim_pos = list(victim.pos)
-    game.kill_cell(victim)
-    attacker.add_health()
-    if game.grid[victim_pos[0], victim_pos[1]] == 0:
-        game.update_cell(*attacker_origin, victim_pos, attacker)
-        if game.grid[attacker_origin[0], attacker_origin[1]] == 0:
-            game.add_cell(*attacker_origin, game.mutate(attacker))
-    return True
+def planned_family_actions(game, cells):
+    planned_list = planned_family_action_list(game, cells)
+    if planned_list is None:
+        return {}
+    return {
+        id(cell): planned
+        for cell, planned in zip(cells, planned_list)
+        if planned is not None
+    }
 
 
 def step_sequential(game):
-    # Iterate over a snapshot because combat can remove cells before their turn.
-    # The membership check preserves the original order for surviving cells while
-    # preventing removed cells from acting later in the same frame.
-    for cell in list(game.cells):
-        if cell not in game.cells:
-            continue
-        y, x = cell.pos
-        action = compute_actions(game, [cell])[id(cell)]
+    cells = list(game.cells)
+    game.defer_cell_list_removals = True
+    game.cells_removed_this_step = False
+    grid = game.grid
+    index = game.cells_by_pos
+    stride = game._cell_key_stride
+    direction_deltas = DIRECTION_DELTAS
+    mutate = game.mutate
+    add_cell = game.add_cell
+    try:
+        for cell in cells:
+            if index.get(cell.y * stride + cell.x) is not cell:
+                continue
+            y, x = cell.y, cell.x
+            neighbors = grid[y-2:y+3, x-2:x+3].reshape(25)
+            action = cell.forward_flat_neighbors25(neighbors)
 
-        if action != 0:
-            new_loc = direction_dict[action]([y, x])
-        
+            if action != 0:
+                dy, dx = direction_deltas[action]
+                new_y = y + dy
+                new_x = x + dx
 
-            if game.grid[new_loc[0], new_loc[1]] != -1:
-
-                if game.grid[new_loc[0], new_loc[1]] == 0: # if the new location is empty
-                    game.update_cell(y, x, new_loc, cell)
-                else:
-                    #sucess = game.damage_cell(game.get_cell(*new_loc)) # bites the other cell
-                    ###
-                    ncell = game.get_cell(*new_loc)
-                    if ncell == False:
-                        pos = [*new_loc]
-                        if pos[0] < 2 or pos[0] > game.size.lines-2 or pos[1] < 2 or pos[1] > game.size.columns-2:
-                            game.grid[pos[0], pos[1]] = -1
-                        else:
-                            game.grid[pos[0], pos[1]] = 0
-                        continue
-                    ###
-                    if game.apply_damage(ncell):
-                        resolve_successful_attack(game, cell, ncell)
+                if grid[new_y, new_x] != -1:
+                    if grid[new_y, new_x] == 0:
+                        old_key = y * stride + x
+                        new_key = new_y * stride + new_x
+                        cell.y = new_y
+                        cell.x = new_x
+                        cell.pos = [new_y, new_x]
+                        grid[new_y, new_x] = 1
+                        del index[old_key]
+                        index[new_key] = cell
+                        grid[y, x] = 0
                     else:
-                        game.damage_cell(cell)
-            else:
-                game.damage_cell(cell)
-        else:
-            pass
-            #game.damage_cell(cell) # if it doesn't move it loses health
-            #game.remove_cell(y, x) # if it doesn't move it dies
-            
-    return game    
+                        ncell = index.get(new_y * stride + new_x, False)
+                        if ncell == False:
+                            if new_y < 2 or new_y > game.size.lines-2 or new_x < 2 or new_x > game.size.columns-2:
+                                grid[new_y, new_x] = -1
+                            else:
+                                grid[new_y, new_x] = 0
+                            continue
 
+                        ncell.health -= 1
+                        success = ncell.health <= 0
+                        if success:
+                            grid[new_y, new_x] = 0
+                            del index[new_y * stride + new_x]
+                            game.cells_removed_this_step = True
+                            cell.add_health()
+                            old_key = y * stride + x
+                            new_key = new_y * stride + new_x
+                            cell.y = new_y
+                            cell.x = new_x
+                            cell.pos = [new_y, new_x]
+                            grid[new_y, new_x] = 1
+                            del index[old_key]
+                            index[new_key] = cell
+                            grid[y, x] = 0
+                            add_cell(y, x, mutate(cell))
+                        else:
+                            cell.health -= 1
+                            if cell.health <= 0:
+                                grid[y, x] = 0
+                                del index[y * stride + x]
+                                game.cells_removed_this_step = True
+                else:
+                    cell.health -= 1
+                    if cell.health <= 0:
+                        grid[y, x] = 0
+                        del index[y * stride + x]
+                        game.cells_removed_this_step = True
+    finally:
+        game.defer_cell_list_removals = False
+        if game.cells_removed_this_step:
+            game.compact_cells()
 
-def step_simultaneous(game):
-    acting_cells = list(game.cells)
-    actions = compute_actions(game, acting_cells)
-    start_positions = {tuple(cell.pos): cell for cell in acting_cells if cell in game.cells}
-    start_grid = game.grid.copy()
-    proposals = {}
-    target_to_movers = {}
-
-    for cell in acting_cells:
-        if cell not in game.cells:
-            continue
-        action = actions.get(id(cell), 0)
-        target = tuple(direction_dict[action](cell.pos).tolist())
-        proposals[cell] = {'action': action, 'origin': tuple(cell.pos), 'target': target}
-        if action != 0:
-            target_to_movers.setdefault(target, []).append(cell)
-
-    resolved = set()
-    for cell, proposal in proposals.items():
-        target = proposal['target']
-        if proposal['action'] != 0 and start_grid[target[0], target[1]] == -1:
-            game.damage_cell(cell)
-            resolved.add(cell)
-
-    for target, attackers in target_to_movers.items():
-        if start_grid[target[0], target[1]] != 1:
-            continue
-        victim = start_positions.get(target)
-        live_attackers = [cell for cell in attackers if cell in game.cells and cell is not victim]
-        if victim is None or victim not in game.cells or not live_attackers:
-            continue
-
-        winner = random.choice(live_attackers)
-        victim_proposal = proposals.get(victim)
-        victim_moving = victim_proposal is not None and victim_proposal['action'] != 0 and victim_proposal['target'] != target
-        if victim_moving:
-            # A cell that tries to leave an attacked square gets an escape roll.
-            # This removes deterministic first-mover advantage while keeping
-            # combat local and cheap to resolve after batched action inference.
-            caught = random.random() < 0.5
-            if caught:
-                resolve_successful_attack(game, winner, victim)
-                resolved.add(winner)
-                resolved.add(victim)
-            for attacker in live_attackers:
-                if attacker is not winner and attacker in game.cells:
-                    game.damage_cell(attacker)
-                    resolved.add(attacker)
-            if not caught:
-                for attacker in live_attackers:
-                    if attacker in game.cells:
-                        game.damage_cell(attacker)
-                        resolved.add(attacker)
-            continue
-
-        if game.apply_damage(victim):
-            resolve_successful_attack(game, winner, victim)
-        else:
-            game.damage_cell(winner)
-        resolved.add(winner)
-        resolved.add(victim)
-        for attacker in live_attackers:
-            if attacker is not winner and attacker in game.cells:
-                game.damage_cell(attacker)
-                resolved.add(attacker)
-
-    for target, movers in target_to_movers.items():
-        if start_grid[target[0], target[1]] != 0:
-            continue
-        candidates = [cell for cell in movers if cell in game.cells and cell not in resolved]
-        if not candidates:
-            continue
-        winner = random.choice(candidates)
-        move_cell_if_open(game, winner, list(target))
-        resolved.add(winner)
-        for loser in candidates:
-            if loser is not winner and loser in game.cells:
-                game.damage_cell(loser)
-                resolved.add(loser)
     return game
 
 
 def step(game):
-    if getattr(game, 'action_mode', DEFAULT_ACTION_MODE) == ACTION_MODE_SIMULTANEOUS:
-        return step_simultaneous(game)
-    return step_sequential(game)
+    if getattr(game, 'action_backend', ACTION_BACKEND_SEQUENTIAL) != ACTION_BACKEND_FAMILY_BATCHED:
+        return step_sequential(game)
+
+    # Iterate over a snapshot because combat can remove cells before their turn.
+    # The membership check preserves the original order for surviving cells while
+    # preventing removed cells from acting later in the same frame.
+    cells = list(game.cells)
+    planned_actions = None
+    if getattr(game, 'action_backend', ACTION_BACKEND_SEQUENTIAL) == ACTION_BACKEND_FAMILY_BATCHED:
+        planned_actions = planned_family_action_list(game, cells)
+
+    game.defer_cell_list_removals = True
+    game.cells_removed_this_step = False
+    grid = game.grid
+    index = game.cells_by_pos
+    stride = game._cell_key_stride
+    try:
+        for cell_order, cell in enumerate(cells):
+            if index.get(cell.y * stride + cell.x) is not cell:
+                continue
+            y, x = cell.y, cell.x
+            if planned_actions is None:
+                # get the surrounding positions
+                neighbors = grid[y-2:y+3, x-2:x+3].reshape(25)
+                action = cell.forward_flat_neighbors25(neighbors)
+            else:
+                planned = planned_actions[cell_order]
+                if planned is None:
+                    neighbors = grid[y-2:y+3, x-2:x+3].reshape(25)
+                    action = cell.forward_flat_neighbors25(neighbors)
+                else:
+                    action, hidden = planned
+                    cell.commit_forward_state(hidden)
+
+            if action != 0:
+                dy, dx = DIRECTION_DELTAS[action]
+                new_y = y + dy
+                new_x = x + dx
+
+
+                if grid[new_y, new_x] != -1:
+
+                    if grid[new_y, new_x] == 0: # if the new location is empty
+                        old_key = int(y) * stride + int(x)
+                        new_key = new_y * stride + new_x
+                        cell.y = new_y
+                        cell.x = new_x
+                        cell.pos = [new_y, new_x]
+                        grid[new_y, new_x] = 1
+                        index.pop(old_key, None)
+                        index[new_key] = cell
+                        grid[y, x] = 0
+                    else:
+                        #sucess = game.damage_cell(game.get_cell(*new_loc)) # bites the other cell
+                        ###
+                        ncell = index.get(new_y * stride + new_x, False)
+                        if ncell == False:
+                            if new_y < 2 or new_y > game.size.lines-2 or new_x < 2 or new_x > game.size.columns-2:
+                                grid[new_y, new_x] = -1
+                            else:
+                                grid[new_y, new_x] = 0
+                            continue
+                        ###
+                        ncell.health -= 1
+                        sucess = ncell.health <= 0
+                        if sucess:
+                            grid[new_y, new_x] = 0
+                            index.pop(new_y * stride + new_x, None)
+                            game.cells_removed_this_step = True
+                        if sucess: # if the other cell dies
+                            cell.add_health() # gains health cus it ate !
+                            old_key = int(y) * stride + int(x)
+                            new_key = new_y * stride + new_x
+                            cell.y = new_y
+                            cell.x = new_x
+                            cell.pos = [new_y, new_x]
+                            grid[new_y, new_x] = 1
+                            index.pop(old_key, None)
+                            index[new_key] = cell
+                            grid[y, x] = 0
+                            game.add_cell(y, x, game.mutate(cell))
+                        else:
+                            cell.health -= 1
+                            if cell.health <= 0:
+                                grid[y, x] = 0
+                                index.pop(int(y) * stride + int(x), None)
+                                game.cells_removed_this_step = True
+                else:
+                    cell.health -= 1
+                    if cell.health <= 0:
+                        grid[y, x] = 0
+                        index.pop(int(y) * stride + int(x), None)
+                        game.cells_removed_this_step = True
+            else:
+                pass
+                #game.damage_cell(cell) # if it doesn't move it loses health
+                #game.remove_cell(y, x) # if it doesn't move it dies
+    finally:
+        game.defer_cell_list_removals = False
+        if game.cells_removed_this_step:
+            game.compact_cells()
+            
+    return game    
 
 
 def init(game, num=2500):
-    total_in_game = len(game.cells)
     num = min(num, len(empty_positions(game)))
-    if game.mutation_mode == MUTATION_MODE_SHARED_RANK1:
-        game.ensure_shared_base()
-    for i in range(num):
-        new_cell = random_spawn(game)
-        if game.mutation_mode == MUTATION_MODE_SHARED_RANK1:
-            # New wave cells share the current round base genome and differ
-            # only by rank-1 perturbations. Survivors from older rounds retain
-            # their own base_id, so extinct bases naturally disappear.
-            game.add_cell(*new_cell, genes=game.shared_rank1_genes())
-        # Preserve the original startup behavior: when the dish begins empty,
-        # every initial cell is independently random. Only later wave spawns
-        # mutate from the cells that existed before the wave started.
-        elif total_in_game == 0:
-            game.add_cell(*new_cell)
-        else:
-            cell = random.choice(game.cells)
-            game.add_cell(*new_cell, genes=game.mutate(cell))
-            total_in_game -= 1
+    factored_wave_family = game.make_factored_wave_family()
+    weight_1, weight_2, coeff_1, coeff_2 = game.wave_factored_tensors(factored_wave_family, num)
+    for index in range(num):
+        new_cell = random_spawn(game, check_available=False)
+        game.add_factored_cell(
+            new_cell[0],
+            new_cell[1],
+            factored_wave_family,
+            coeff_1[index],
+            coeff_2[index],
+            weight_1[index],
+            weight_2[index],
+        )
 
     return game
 
@@ -793,11 +956,20 @@ def prune(game):
 
 def main(args):
     seed_all(args.seed)
-    with torch.no_grad():
+    with torch.inference_mode():
         if args.load:
             game = load_state(args.load)
+            game.action_backend = args.action_backend
+            game.action_device = args.action_device
+            game.batched_min_family_size = args.batched_min_family_size
         else:
-            game = init(Game(size=args.size, mutation_mode=args.mutation_mode, action_mode=args.action_mode), num=args.initial_cells)
+            game = init(Game(
+                size=args.size,
+                mutation_mode=args.mutation_mode,
+                action_backend=args.action_backend,
+                action_device=args.action_device,
+                batched_min_family_size=args.batched_min_family_size,
+            ), num=args.initial_cells)
 
         countdown = ROUNDTIME
         frame = 0
@@ -842,7 +1014,22 @@ def save_state(game, name):
 
 def load_state(name):
     with open(name, 'rb') as f:
-        return pickle.load(f)
+        game = pickle.load(f)
+    if not hasattr(game, '_cell_key_stride'):
+        game._cell_key_stride = game.grid.shape[1]
+    if not hasattr(game, 'defer_cell_list_removals'):
+        game.defer_cell_list_removals = False
+    if not hasattr(game, 'cells_removed_this_step'):
+        game.cells_removed_this_step = False
+    for cell in game.cells:
+        if not hasattr(cell, 'y') or not hasattr(cell, 'x'):
+            cell.y = int(cell.pos[0])
+            cell.x = int(cell.pos[1])
+        cell.pos = [int(cell.y), int(cell.x)]
+        if getattr(cell, 'prev_state', None) is None:
+            cell.prev_state = np.zeros(9, dtype=np.float32)
+    game._rebuild_cell_index()
+    return game
 
 
 
@@ -856,7 +1043,19 @@ if __name__ == '__main__':
     parser.add_argument('--size', type=parse_size, help='grid size as LINESxCOLUMNS, for example 24x80')
     parser.add_argument('--initial-cells', type=positive_int, default=2500, help='number of cells to spawn initially')
     parser.add_argument('--mutation-mode', choices=MUTATION_MODES, default=DEFAULT_MUTATION_MODE)
-    parser.add_argument('--action-mode', choices=ACTION_MODES, default=DEFAULT_ACTION_MODE)
+    parser.add_argument(
+        '--action-backend',
+        choices=ACTION_BACKENDS,
+        default=ACTION_BACKEND_SEQUENTIAL,
+        help='action evaluator; family_batched is experimental snapshot semantics, sequential is exact',
+    )
+    parser.add_argument('--action-device', choices=('auto', 'cpu', 'cuda'), default='auto')
+    parser.add_argument(
+        '--batched-min-family-size',
+        type=positive_int,
+        default=32,
+        help='minimum compatible family size for the batched action backend',
+    )
     parser.add_argument('--max-frames', type=positive_int, help='stop after this many frames')
     parser.add_argument('--snapshot-dir', help='write plain-text frame snapshots to this directory')
     parser.add_argument('--snapshot-every', type=positive_int, default=1, help='write one snapshot every N frames')
