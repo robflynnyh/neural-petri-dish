@@ -11,6 +11,8 @@ HIDDEN_DIM = 9
 OUTPUT_DIM = 9
 GRID_DTYPE = torch.int8
 INDEX_GRID_DTYPE = torch.int32
+MAX_HEALTH = 15
+KILL_REWARD = 2
 _COMPILED_SNAPSHOT_COMBAT_STEP = {}
 _COMPILED_REBUILD_SNAPSHOT_COMBAT_STEP = {}
 _COMPILED_FAMILY_BASIS_REBUILD_SNAPSHOT_COMBAT_STEP = {}
@@ -21,6 +23,8 @@ HEALTH_DTYPES = {
 }
 MATMUL_PRECISIONS = ('highest', 'high', 'medium')
 COMPILE_MODES = ('default', 'reduce-overhead', 'max-autotune')
+ACTIVATION_LIMIT = 1.0e6
+LOGIT_LIMIT = 1.0e6
 
 
 def resolve_device(name):
@@ -82,6 +86,28 @@ def normalize_rank1_factors_(left, right):
     right.div_(scale)
 
 
+def init_linear_weight_bias(out_features, in_features, count, device):
+    weights = torch.empty(count, out_features, in_features, device=device)
+    biases = torch.empty(count, out_features, device=device)
+    for index in range(count):
+        torch.nn.init.kaiming_uniform_(weights[index], a=5 ** 0.5)
+    bound = in_features ** -0.5
+    torch.nn.init.uniform_(biases, -bound, bound)
+    return weights, biases
+
+
+def sanitize_recurrent_state(recurrent_state):
+    return torch.nan_to_num(recurrent_state, nan=0.0, posinf=ACTIVATION_LIMIT, neginf=0.0)
+
+
+def stabilize_hidden(hidden):
+    return hidden.clamp_(0.0, ACTIVATION_LIMIT)
+
+
+def stabilize_logits(logits):
+    return logits.clamp_(-LOGIT_LIMIT, LOGIT_LIMIT)
+
+
 def snapshot_combat_step_tensors(
         grid,
         index_grid,
@@ -104,21 +130,21 @@ def snapshot_combat_step_tensors(
     inputs = torch.empty(flat_positions.shape[0], INPUT_DIM, device=grid.device)
     neighbor_indices = flat_positions[:, None] + neighbor_flat_offsets[None, :]
     inputs[:, :24] = grid.reshape(-1)[neighbor_indices]
-    inputs[:, 24:] = recurrent_state
+    inputs[:, 24:] = sanitize_recurrent_state(recurrent_state)
 
     selected_base_weight_1 = base_weight_1[family_index]
     selected_v_1 = v_1[family_index]
     selected_u_1 = u_1[family_index]
     base_hidden = torch.bmm(selected_base_weight_1, inputs.unsqueeze(2)).squeeze(2)
     rank1_hidden_scale = (inputs * selected_v_1).sum(dim=1) * coeff_1
-    hidden = torch.relu(base_hidden + rank1_hidden_scale.unsqueeze(1) * selected_u_1 + bias_1)
+    hidden = stabilize_hidden(torch.relu(base_hidden + rank1_hidden_scale.unsqueeze(1) * selected_u_1 + bias_1))
 
     selected_base_weight_2 = base_weight_2[family_index]
     selected_v_2 = v_2[family_index]
     selected_u_2 = u_2[family_index]
     base_logits = torch.bmm(selected_base_weight_2, hidden.unsqueeze(2)).squeeze(2)
     rank1_logit_scale = (hidden * selected_v_2).sum(dim=1) * coeff_2
-    logits = base_logits + rank1_logit_scale.unsqueeze(1) * selected_u_2 + bias_2
+    logits = stabilize_logits(base_logits + rank1_logit_scale.unsqueeze(1) * selected_u_2 + bias_2)
     actions = logits.argmax(dim=1)
 
     old_flat_positions = flat_positions
@@ -136,9 +162,11 @@ def snapshot_combat_step_tensors(
 
     target_health_after = health[valid_targets] - damage_received[valid_targets]
     target_survives = hits_occupied & (target_health_after > 0)
+    target_killed = hits_occupied & (target_health_after <= 0)
     attacker_penalty = (hits_border | target_survives).to(health.dtype)
-    new_health = health - damage_received - attacker_penalty
-    new_flat_positions = torch.where(hits_empty, target_flat_positions, flat_positions)
+    attacker_reward = target_killed.to(health.dtype) * KILL_REWARD
+    new_health = (health - damage_received - attacker_penalty + attacker_reward).clamp_max(MAX_HEALTH)
+    new_flat_positions = torch.where(hits_empty | target_killed, target_flat_positions, flat_positions)
 
     alive = new_health > 0
     grid_flat = grid.reshape(-1)
@@ -180,21 +208,21 @@ def snapshot_combat_step_tensors_rebuild_grid(
     inputs = torch.empty(flat_positions.shape[0], INPUT_DIM, device=grid.device)
     neighbor_indices = flat_positions[:, None] + neighbor_flat_offsets[None, :]
     inputs[:, :24] = grid.reshape(-1)[neighbor_indices]
-    inputs[:, 24:] = recurrent_state
+    inputs[:, 24:] = sanitize_recurrent_state(recurrent_state)
 
     selected_base_weight_1 = base_weight_1[family_index]
     selected_v_1 = v_1[family_index]
     selected_u_1 = u_1[family_index]
     base_hidden = torch.bmm(selected_base_weight_1, inputs.unsqueeze(2)).squeeze(2)
     rank1_hidden_scale = (inputs * selected_v_1).sum(dim=1) * coeff_1
-    hidden = torch.relu(base_hidden + rank1_hidden_scale.unsqueeze(1) * selected_u_1 + bias_1)
+    hidden = stabilize_hidden(torch.relu(base_hidden + rank1_hidden_scale.unsqueeze(1) * selected_u_1 + bias_1))
 
     selected_base_weight_2 = base_weight_2[family_index]
     selected_v_2 = v_2[family_index]
     selected_u_2 = u_2[family_index]
     base_logits = torch.bmm(selected_base_weight_2, hidden.unsqueeze(2)).squeeze(2)
     rank1_logit_scale = (hidden * selected_v_2).sum(dim=1) * coeff_2
-    logits = base_logits + rank1_logit_scale.unsqueeze(1) * selected_u_2 + bias_2
+    logits = stabilize_logits(base_logits + rank1_logit_scale.unsqueeze(1) * selected_u_2 + bias_2)
     actions = logits.argmax(dim=1)
 
     target_flat_positions = flat_positions + direction_flat_deltas[actions]
@@ -211,9 +239,11 @@ def snapshot_combat_step_tensors_rebuild_grid(
 
     target_health_after = health[valid_targets] - damage_received[valid_targets]
     target_survives = hits_occupied & (target_health_after > 0)
+    target_killed = hits_occupied & (target_health_after <= 0)
     attacker_penalty = (hits_border | target_survives).to(health.dtype)
-    new_health = health - damage_received - attacker_penalty
-    new_flat_positions = torch.where(hits_empty, target_flat_positions, flat_positions)
+    attacker_reward = target_killed.to(health.dtype) * KILL_REWARD
+    new_health = (health - damage_received - attacker_penalty + attacker_reward).clamp_max(MAX_HEALTH)
+    new_flat_positions = torch.where(hits_empty | target_killed, target_flat_positions, flat_positions)
 
     alive = new_health > 0
     index_grid[2:-2, 2:-2].fill_(-1)
@@ -237,6 +267,7 @@ def snapshot_combat_step_tensors_family_basis_rebuild_grid(
         index_grid,
         flat_positions,
         health,
+        stationary_steps,
         recurrent_state,
         family_index,
         coeff_1,
@@ -249,6 +280,7 @@ def snapshot_combat_step_tensors_family_basis_rebuild_grid(
         v_1,
         u_2,
         v_2,
+        stationary_health_cap,
         scatter_indices,
         dead_scatter_indices,
         neighbor_flat_offsets,
@@ -261,7 +293,7 @@ def snapshot_combat_step_tensors_family_basis_rebuild_grid(
     # occupied=1. This avoids maintaining a duplicate binary occupancy grid.
     neighbor_values = index_flat[neighbor_indices]
     inputs[:, :24] = (neighbor_values >= 0).to(inputs.dtype) - (neighbor_values == -2).to(inputs.dtype)
-    inputs[:, 24:] = recurrent_state
+    inputs[:, 24:] = sanitize_recurrent_state(recurrent_state)
 
     family_count = base_weight_1_matmul.shape[1] // HIDDEN_DIM
     base_hidden_flat = inputs.matmul(base_weight_1_matmul)
@@ -271,7 +303,7 @@ def snapshot_combat_step_tensors_family_basis_rebuild_grid(
     selected_v_1 = v_1[family_index]
     selected_u_1 = u_1[family_index]
     rank1_hidden_scale = (inputs * selected_v_1).sum(dim=1) * coeff_1
-    hidden = torch.relu(base_hidden + rank1_hidden_scale.unsqueeze(1) * selected_u_1 + bias_1)
+    hidden = stabilize_hidden(torch.relu(base_hidden + rank1_hidden_scale.unsqueeze(1) * selected_u_1 + bias_1))
 
     base_logits_flat = hidden.matmul(base_weight_2_matmul)
     base_logits_all = base_logits_flat.reshape(flat_positions.shape[0], family_count, OUTPUT_DIM)
@@ -280,7 +312,7 @@ def snapshot_combat_step_tensors_family_basis_rebuild_grid(
     selected_v_2 = v_2[family_index]
     selected_u_2 = u_2[family_index]
     rank1_logit_scale = (hidden * selected_v_2).sum(dim=1) * coeff_2
-    logits = base_logits + rank1_logit_scale.unsqueeze(1) * selected_u_2 + bias_2
+    logits = stabilize_logits(base_logits + rank1_logit_scale.unsqueeze(1) * selected_u_2 + bias_2)
     actions = logits.argmax(dim=1)
 
     target_flat_positions = flat_positions + direction_flat_deltas[actions]
@@ -297,9 +329,17 @@ def snapshot_combat_step_tensors_family_basis_rebuild_grid(
 
     target_health_after = health[valid_targets] - damage_received[valid_targets]
     target_survives = hits_occupied & (target_health_after > 0)
+    target_killed = hits_occupied & (target_health_after <= 0)
     attacker_penalty = (hits_border | target_survives).to(health.dtype)
-    new_health = health - damage_received - attacker_penalty
-    new_flat_positions = torch.where(hits_empty, target_flat_positions, flat_positions)
+    attacker_reward = target_killed.to(health.dtype) * KILL_REWARD
+    new_health = (health - damage_received - attacker_penalty + attacker_reward).clamp_max(MAX_HEALTH)
+    new_flat_positions = torch.where(hits_empty | target_killed, target_flat_positions, flat_positions)
+    stayed_put = active & (new_flat_positions == flat_positions)
+    new_stationary_steps = torch.where(stayed_put, stationary_steps + 1, torch.zeros_like(stationary_steps))
+    stationary_cap = stationary_health_cap.to(health.dtype)
+    cap_stationary = (stationary_health_cap > 0) & (new_stationary_steps >= 3)
+    new_health = torch.where(cap_stationary, torch.minimum(new_health, stationary_cap), new_health)
+    new_stationary_steps = torch.where(new_health > 0, new_stationary_steps, torch.zeros_like(new_stationary_steps))
 
     alive = new_health > 0
     index_grid[2:-2, 2:-2].fill_(-1)
@@ -311,7 +351,7 @@ def snapshot_combat_step_tensors_family_basis_rebuild_grid(
         reduce='amax',
         include_self=True,
     )
-    return new_flat_positions, new_health, hidden, actions
+    return new_flat_positions, new_health, new_stationary_steps, hidden, actions
 
 
 def resolve_compile_mode(mode):
@@ -357,6 +397,7 @@ def family_basis_rebuild_snapshot_combat_block_tensors(block_steps):
             index_grid,
             flat_positions,
             health,
+            stationary_steps,
             recurrent_state,
             family_index,
             coeff_1,
@@ -369,15 +410,17 @@ def family_basis_rebuild_snapshot_combat_block_tensors(block_steps):
             v_1,
             u_2,
             v_2,
+            stationary_health_cap,
             scatter_indices,
             dead_scatter_indices,
             neighbor_flat_offsets,
             direction_flat_deltas):
         for _ in range(block_steps):
-            flat_positions, health, recurrent_state, _actions = snapshot_combat_step_tensors_family_basis_rebuild_grid(
+            flat_positions, health, stationary_steps, recurrent_state, _actions = snapshot_combat_step_tensors_family_basis_rebuild_grid(
                 index_grid,
                 flat_positions,
                 health,
+                stationary_steps,
                 recurrent_state,
                 family_index,
                 coeff_1,
@@ -390,12 +433,13 @@ def family_basis_rebuild_snapshot_combat_block_tensors(block_steps):
                 v_1,
                 u_2,
                 v_2,
+                stationary_health_cap,
                 scatter_indices,
                 dead_scatter_indices,
                 neighbor_flat_offsets,
                 direction_flat_deltas,
             )
-        return flat_positions, health, recurrent_state
+        return flat_positions, health, stationary_steps, recurrent_state
 
     return block_fn
 
@@ -428,36 +472,21 @@ class CudaGraphFamilyBasisBlockRunner:
         original_index_grid = state.index_grid.clone()
         original_flat_positions = state.flat_positions.clone()
         original_health = state.health.clone()
+        original_stationary_steps = state.stationary_steps.clone()
         original_recurrent_state = state.recurrent_state.clone()
 
         with torch.cuda.graph(self.graph):
-            flat_positions, health, recurrent_state = self.step_fn(
-                state.index_grid,
-                state.flat_positions,
-                state.health,
-                state.recurrent_state,
-                state.family_index,
-                state.coeff_1,
-                state.coeff_2,
-                state.bias_1,
-                state.bias_2,
-                state.base_weight_1_matmul,
-                state.base_weight_2_matmul,
-                state.u_1,
-                state.v_1,
-                state.u_2,
-                state.v_2,
-                state.index_grid_indices(),
-                state.dead_index_grid_indices(),
-                state.neighbor_flat_offsets,
-                state.direction_flat_deltas,
+            flat_positions, health, stationary_steps, recurrent_state = self.step_fn(
+                *state.family_basis_block_args()
             )
             state.flat_positions.copy_(flat_positions)
             state.health.copy_(health)
+            state.stationary_steps.copy_(stationary_steps)
             state.recurrent_state.copy_(recurrent_state)
         state.index_grid.copy_(original_index_grid)
         state.flat_positions.copy_(original_flat_positions)
         state.health.copy_(original_health)
+        state.stationary_steps.copy_(original_stationary_steps)
         state.recurrent_state.copy_(original_recurrent_state)
         synchronize(state.device)
 
@@ -474,6 +503,7 @@ class TensorRank1State:
     positions: torch.Tensor
     flat_positions: torch.Tensor
     health: torch.Tensor
+    stationary_steps: torch.Tensor
     recurrent_state: torch.Tensor
     family_index: torch.Tensor
     coeff_1: torch.Tensor
@@ -488,6 +518,7 @@ class TensorRank1State:
     v_1: torch.Tensor
     u_2: torch.Tensor
     v_2: torch.Tensor
+    stationary_health_cap: torch.Tensor
     neighbor_offsets: torch.Tensor
     neighbor_flat_offsets: torch.Tensor
     direction_deltas: torch.Tensor
@@ -503,7 +534,9 @@ class TensorRank1State:
             families,
             device,
             initial_health=2,
-            health_dtype=torch.long):
+            health_dtype=torch.long,
+            coeff_scale=npd.FACTORED_WAVE_COEFF_SCALE,
+            stationary_health_cap=0):
         device = torch.device(device)
         playable_rows = height - 2
         playable_cols = width
@@ -525,13 +558,14 @@ class TensorRank1State:
 
         family_index = torch.randint(families, (cells,), device=device)
         health = torch.full((cells,), initial_health, device=device, dtype=health_dtype)
+        stationary_steps = torch.zeros(cells, device=device, dtype=torch.int16)
         recurrent_state = torch.zeros(cells, HIDDEN_DIM, device=device)
-        coeff_1 = torch.randn(cells, device=device) * npd.FACTORED_WAVE_COEFF_SCALE
-        coeff_2 = torch.randn(cells, device=device) * npd.FACTORED_WAVE_COEFF_SCALE
-        bias_1 = torch.randn(cells, HIDDEN_DIM, device=device)
-        bias_2 = torch.randn(cells, OUTPUT_DIM, device=device)
-        base_weight_1 = torch.randn(families, HIDDEN_DIM, INPUT_DIM, device=device)
-        base_weight_2 = torch.randn(families, OUTPUT_DIM, HIDDEN_DIM, device=device)
+        coeff_1 = torch.randn(cells, device=device) * coeff_scale
+        coeff_2 = torch.randn(cells, device=device) * coeff_scale
+        base_weight_1, family_bias_1 = init_linear_weight_bias(HIDDEN_DIM, INPUT_DIM, families, device)
+        base_weight_2, family_bias_2 = init_linear_weight_bias(OUTPUT_DIM, HIDDEN_DIM, families, device)
+        bias_1 = family_bias_1[family_index].clone()
+        bias_2 = family_bias_2[family_index].clone()
         base_weight_1_matmul = flatten_base_weight_1_for_matmul(base_weight_1)
         base_weight_2_matmul = flatten_base_weight_2_for_matmul(base_weight_2)
         u_1 = torch.randn(families, HIDDEN_DIM, device=device)
@@ -548,6 +582,7 @@ class TensorRank1State:
             positions=positions,
             flat_positions=grid_flat_positions,
             health=health,
+            stationary_steps=stationary_steps,
             recurrent_state=recurrent_state,
             family_index=family_index,
             coeff_1=coeff_1,
@@ -562,6 +597,7 @@ class TensorRank1State:
             v_1=v_1,
             u_2=u_2,
             v_2=v_2,
+            stationary_health_cap=torch.as_tensor(stationary_health_cap, device=device, dtype=health_dtype),
             neighbor_offsets=torch.as_tensor(npd.NEIGHBOR_OFFSETS, device=device, dtype=torch.long),
             neighbor_flat_offsets=torch.as_tensor(
                 [dy * grid_stride + dx for dy, dx in npd.NEIGHBOR_OFFSETS],
@@ -588,7 +624,9 @@ class TensorRank1State:
             device,
             initial_health=2,
             cell_capacity=None,
-            health_dtype=torch.long):
+            health_dtype=torch.long,
+            coeff_scale=npd.FACTORED_WAVE_COEFF_SCALE,
+            stationary_health_cap=0):
         board_capacity = (height - 2) * width
         capacity = board_capacity if cell_capacity is None else int(cell_capacity)
         if active_cells > capacity:
@@ -605,6 +643,8 @@ class TensorRank1State:
             device=device,
             initial_health=initial_health,
             health_dtype=health_dtype,
+            coeff_scale=coeff_scale,
+            stationary_health_cap=stationary_health_cap,
         )
         state.reserve_inactive_family_slots(family_capacity)
         if active_cells > 0:
@@ -794,6 +834,31 @@ class TensorRank1State:
             self._dead_mask_buffer = cached
         return cached
 
+    def family_basis_block_args(self):
+        return (
+            self.index_grid,
+            self.flat_positions,
+            self.health,
+            self.stationary_steps,
+            self.recurrent_state,
+            self.family_index,
+            self.coeff_1,
+            self.coeff_2,
+            self.bias_1,
+            self.bias_2,
+            self.base_weight_1_matmul,
+            self.base_weight_2_matmul,
+            self.u_1,
+            self.v_1,
+            self.u_2,
+            self.v_2,
+            self.stationary_health_cap,
+            self.index_grid_indices(),
+            self.dead_index_grid_indices(),
+            self.neighbor_flat_offsets,
+            self.direction_flat_deltas,
+        )
+
     def alive_mask(self):
         return self.health > 0
 
@@ -826,7 +891,7 @@ class TensorRank1State:
         neighbors = self.grid.reshape(-1)[neighbor_indices]
         inputs = self.input_buffer()
         inputs[:, :24] = neighbors
-        inputs[:, 24:] = self.recurrent_state
+        inputs[:, 24:] = sanitize_recurrent_state(self.recurrent_state)
         return inputs
 
     def forward_actions(self):
@@ -839,6 +904,7 @@ class TensorRank1State:
                 rank1_hidden_scale.unsqueeze(1),
                 self.u_1[single_family_id].unsqueeze(0),
             ).add_(self.bias_1).relu_()
+            hidden = stabilize_hidden(hidden)
             base_logits = hidden.matmul(self.base_weight_2[single_family_id].t())
             rank1_logit_scale = hidden.matmul(self.v_2[single_family_id]) * self.coeff_2
             logits = base_logits.addcmul_(
@@ -855,6 +921,7 @@ class TensorRank1State:
                 rank1_hidden_scale.unsqueeze(1),
                 selected_u_1,
             ).add_(self.bias_1).relu_()
+            hidden = stabilize_hidden(hidden)
             selected_base_weight_2 = self.base_weight_2[self.family_index]
             selected_v_2 = self.v_2[self.family_index]
             selected_u_2 = self.u_2[self.family_index]
@@ -865,6 +932,7 @@ class TensorRank1State:
                 selected_u_2,
             )
         logits.add_(self.bias_2)
+        logits = stabilize_logits(logits)
         self.recurrent_state = hidden
         return logits.argmax(dim=1)
 
@@ -955,7 +1023,6 @@ class TensorRank1State:
         hits_border = moving & (target_indices == -2)
         hits_empty = moving & (target_indices == -1)
         hits_occupied = moving & (target_indices >= 0)
-
         valid_targets = target_indices.clamp_min(0).to(torch.long)
         damage_received = self.damage_buffer()
         damage_received.zero_()
@@ -963,10 +1030,26 @@ class TensorRank1State:
 
         target_health_after = self.health[valid_targets] - damage_received[valid_targets]
         target_survives = hits_occupied & (target_health_after > 0)
+        target_killed = hits_occupied & (target_health_after <= 0)
         attacker_penalty = (hits_border | target_survives).to(self.health.dtype)
-        self.health = self.health - damage_received - attacker_penalty
+        attacker_reward = target_killed.to(self.health.dtype) * KILL_REWARD
+        new_health = (self.health - damage_received - attacker_penalty + attacker_reward).clamp_max(MAX_HEALTH)
 
-        self.flat_positions = torch.where(hits_empty, target_flat_positions, self.flat_positions)
+        self.flat_positions = torch.where(hits_empty | target_killed, target_flat_positions, self.flat_positions)
+        stayed_put = active & (self.flat_positions == old_flat_positions)
+        self.stationary_steps = torch.where(
+            stayed_put,
+            self.stationary_steps + 1,
+            torch.zeros_like(self.stationary_steps),
+        )
+        stationary_cap = self.stationary_health_cap.to(self.health.dtype)
+        cap_stationary = (self.stationary_health_cap > 0) & (self.stationary_steps >= 3)
+        self.health = torch.where(cap_stationary, torch.minimum(new_health, stationary_cap), new_health)
+        self.stationary_steps = torch.where(
+            self.health > 0,
+            self.stationary_steps,
+            torch.zeros_like(self.stationary_steps),
+        )
         if sync_positions:
             self.sync_positions_from_flat()
         alive = self.health > 0
@@ -1001,10 +1084,12 @@ class TensorRank1State:
 
     def weighted_survivor_family(self):
         if self.cells == 0 or bool(self.health.clamp_min(0).sum() <= 0):
-            base_weight_1 = torch.randn(HIDDEN_DIM, INPUT_DIM, device=self.device)
-            base_weight_2 = torch.randn(OUTPUT_DIM, HIDDEN_DIM, device=self.device)
-            base_bias_1 = torch.randn(HIDDEN_DIM, device=self.device)
-            base_bias_2 = torch.randn(OUTPUT_DIM, device=self.device)
+            base_weight_1, base_bias_1 = init_linear_weight_bias(HIDDEN_DIM, INPUT_DIM, 1, self.device)
+            base_weight_2, base_bias_2 = init_linear_weight_bias(OUTPUT_DIM, HIDDEN_DIM, 1, self.device)
+            base_weight_1 = base_weight_1[0]
+            base_weight_2 = base_weight_2[0]
+            base_bias_1 = base_bias_1[0]
+            base_bias_2 = base_bias_2[0]
         else:
             weights = self.health.clamp_min(0).to(torch.float32)
             weights = weights / weights.sum().clamp_min(torch.finfo(weights.dtype).eps)
@@ -1105,6 +1190,10 @@ class TensorRank1State:
             self.health,
             torch.full((spawn_count,), initial_health, device=self.device, dtype=self.health.dtype),
         ), dim=0)
+        self.stationary_steps = torch.cat((
+            self.stationary_steps,
+            torch.zeros(spawn_count, device=self.device, dtype=self.stationary_steps.dtype),
+        ), dim=0)
         self.recurrent_state = torch.cat((
             self.recurrent_state,
             torch.zeros(spawn_count, HIDDEN_DIM, device=self.device),
@@ -1176,6 +1265,7 @@ class TensorRank1State:
         self.positions[slots, 0] = new_flat_positions.div(self.grid_stride, rounding_mode='floor')
         self.positions[slots, 1] = new_flat_positions.remainder(self.grid_stride)
         self.health[slots] = initial_health
+        self.stationary_steps[slots] = 0
         self.recurrent_state[slots] = 0
         self.family_index[slots] = new_family_id
         self.coeff_1[slots] = torch.randn(spawn_count, device=self.device) * coeff_scale
@@ -1198,6 +1288,7 @@ class TensorRank1State:
         self.positions = self.positions[alive]
         self.flat_positions = self.flat_positions[alive]
         self.health = self.health[alive]
+        self.stationary_steps = self.stationary_steps[alive]
         self.recurrent_state = self.recurrent_state[alive]
         self.family_index = self.family_index[alive]
         self.coeff_1 = self.coeff_1[alive]
@@ -1220,27 +1311,13 @@ class TensorRank1State:
     def compiled_snapshot_combat_step(self, rebuild_grid=False, family_basis=False, compile_mode='reduce-overhead'):
         if family_basis:
             step_fn = compiled_family_basis_rebuild_snapshot_combat_step_tensors(compile_mode)
-            self.flat_positions, self.health, self.recurrent_state, actions = step_fn(
-                self.index_grid,
+            (
                 self.flat_positions,
                 self.health,
+                self.stationary_steps,
                 self.recurrent_state,
-                self.family_index,
-                self.coeff_1,
-                self.coeff_2,
-                self.bias_1,
-                self.bias_2,
-                self.base_weight_1_matmul,
-                self.base_weight_2_matmul,
-                self.u_1,
-                self.v_1,
-                self.u_2,
-                self.v_2,
-                self.index_grid_indices(),
-                self.dead_index_grid_indices(),
-                self.neighbor_flat_offsets,
-                self.direction_flat_deltas,
-            )
+                actions,
+            ) = step_fn(*self.family_basis_block_args())
         else:
             if rebuild_grid:
                 step_fn = compiled_rebuild_snapshot_combat_step_tensors(compile_mode)
@@ -1279,27 +1356,12 @@ class TensorRank1State:
         if not (rebuild_grid and family_basis):
             raise ValueError('compiled block steps currently require rebuild_grid and family_basis')
         step_fn = compiled_family_basis_rebuild_snapshot_combat_block_tensors(block_steps, compile_mode)
-        self.flat_positions, self.health, self.recurrent_state = step_fn(
-            self.index_grid,
+        (
             self.flat_positions,
             self.health,
+            self.stationary_steps,
             self.recurrent_state,
-            self.family_index,
-            self.coeff_1,
-            self.coeff_2,
-            self.bias_1,
-            self.bias_2,
-            self.base_weight_1_matmul,
-            self.base_weight_2_matmul,
-            self.u_1,
-            self.v_1,
-            self.u_2,
-            self.v_2,
-            self.index_grid_indices(),
-            self.dead_index_grid_indices(),
-            self.neighbor_flat_offsets,
-            self.direction_flat_deltas,
-        )
+        ) = step_fn(*self.family_basis_block_args())
         return None
 
 def benchmark_tensor_state(
@@ -1325,6 +1387,8 @@ def benchmark_tensor_state(
         static_refill_empty=False,
         static_refill_check_every=1,
         health_dtype='int64',
+        coeff_scale=npd.FACTORED_WAVE_COEFF_SCALE,
+        stationary_health_cap=0,
         static_rebuild_grid=False,
         family_basis_step=False,
         matmul_precision=None,
@@ -1418,6 +1482,8 @@ def benchmark_tensor_state(
             initial_health=initial_health,
             cell_capacity=cell_capacity,
             health_dtype=health_dtype,
+            coeff_scale=coeff_scale,
+            stationary_health_cap=stationary_health_cap,
         )
         active_family_count = families
     else:
@@ -1429,6 +1495,8 @@ def benchmark_tensor_state(
             device=device,
             initial_health=initial_health,
             health_dtype=health_dtype,
+            coeff_scale=coeff_scale,
+            stationary_health_cap=stationary_health_cap,
         )
         active_family_count = state.families
     sync_positions_each_step = False
@@ -1613,6 +1681,7 @@ def benchmark_tensor_state(
                         active_family_count,
                         empty_refill_size(),
                         initial_health=wave_initial_health,
+                        coeff_scale=coeff_scale,
                     )
                     clear_cuda_graphs_if_family_capacity_changed(previous_family_version)
                     apply_known_spawn_count(spawned)
@@ -1629,6 +1698,7 @@ def benchmark_tensor_state(
                     empty_refill_size(),
                     initial_health=wave_initial_health,
                     sync_existing_positions=False,
+                    coeff_scale=coeff_scale,
                 )
                 apply_known_spawn_count(spawned)
                 waves_spawned += spawned
@@ -1664,6 +1734,7 @@ def benchmark_tensor_state(
                         active_family_count,
                         round_wave_size,
                         initial_health=wave_initial_health,
+                        coeff_scale=coeff_scale,
                     )
                     clear_cuda_graphs_if_family_capacity_changed(previous_family_version)
                     apply_known_spawn_count(spawned)
@@ -1676,6 +1747,7 @@ def benchmark_tensor_state(
                         round_wave_size,
                         initial_health=wave_initial_health,
                         sync_existing_positions=(compact_every == 1),
+                        coeff_scale=coeff_scale,
                     )
                     apply_known_spawn_count(spawned)
                     waves_spawned += spawned
@@ -1685,6 +1757,7 @@ def benchmark_tensor_state(
                         round_wave_size,
                         initial_health=wave_initial_health,
                         sync_existing_positions=(compact_every == 1),
+                        coeff_scale=coeff_scale,
                     )
                     apply_known_spawn_count(spawned)
                     waves_spawned += spawned
@@ -1723,6 +1796,8 @@ def benchmark_tensor_state(
         'compiled_step': compiled_step,
         'compiled_block_steps': compiled_block_steps if compiled_step else None,
         'compile_mode': compile_mode if compiled_step else None,
+        'coeff_scale': coeff_scale,
+        'stationary_health_cap': stationary_health_cap,
         'cuda_graph_block': cuda_graph_block,
         'timed_cuda_graph_captures': timed_cuda_graph_captures if cuda_graph_block else None,
         'cuda_name': torch.cuda.get_device_name(state.device) if state.device.type == 'cuda' else '',

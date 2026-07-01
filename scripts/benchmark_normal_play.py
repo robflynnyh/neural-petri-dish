@@ -38,14 +38,18 @@ def parse_args():
     parser.add_argument('--batched-min-family-size', type=positive_int, default=4096)
     parser.add_argument('--tensor-initial-health', type=positive_int, default=15)
     parser.add_argument('--tensor-wave-initial-health', type=positive_int, default=2)
+    parser.add_argument('--tensor-coeff-scale', type=float, default=npd.FACTORED_WAVE_COEFF_SCALE)
+    parser.add_argument('--tensor-stationary-health-cap', type=int, default=0)
     parser.add_argument('--tensor-family-capacity', type=positive_int, default=10)
     parser.add_argument('--tensor-cell-capacity', type=positive_int)
     parser.add_argument('--tensor-static-refill-check-every', type=positive_int, default=100)
     parser.add_argument('--tensor-health-dtype', choices=tuple(HEALTH_DTYPES), default='int32')
     parser.add_argument('--tensor-matmul-precision', choices=MATMUL_PRECISIONS, default='high')
     parser.add_argument('--tensor-compile-mode', choices=COMPILE_MODES, default='default')
-    parser.add_argument('--tensor-compiled-block-steps', type=positive_int, default=100)
-    parser.add_argument('--no-tensor-cuda-graph-block', action='store_true')
+    parser.add_argument('--tensor-compiled-block-steps', type=positive_int, default=10)
+    parser.add_argument('--tensor-cuda-graph-block', dest='no_tensor_cuda_graph_block', action='store_false')
+    parser.add_argument('--no-tensor-cuda-graph-block', dest='no_tensor_cuda_graph_block', action='store_true')
+    parser.set_defaults(no_tensor_cuda_graph_block=True)
     parser.add_argument('--output-json')
     args = parser.parse_args()
     if args.engine == 'tensor_rank1' and args.action_device == 'cpu':
@@ -70,6 +74,8 @@ def run_tensor_rank1(args):
         device=resolve_device(device_name),
         initial_health=args.tensor_initial_health,
         health_dtype=args.tensor_health_dtype,
+        coeff_scale=args.tensor_coeff_scale,
+        stationary_health_cap=args.tensor_stationary_health_cap,
         wave_every=npd.ROUNDTIME,
         wave_size=npd.PER_WAVE,
         wave_initial_health=args.tensor_wave_initial_health,

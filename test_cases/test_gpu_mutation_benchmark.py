@@ -446,10 +446,11 @@ def test_snapshot_combat_family_basis_rebuild_step_matches_eager_cpu():
     tensor_step = clone_tensor_state(eager)
 
     eager_actions = eager.step(movement='snapshot_combat', compact_dead=False, sync_positions=False)
-    flat_positions, health, recurrent_state, tensor_actions = snapshot_combat_step_tensors_family_basis_rebuild_grid(
+    flat_positions, health, stationary_steps, recurrent_state, tensor_actions = snapshot_combat_step_tensors_family_basis_rebuild_grid(
         tensor_step.index_grid,
         tensor_step.flat_positions,
         tensor_step.health,
+        tensor_step.stationary_steps,
         tensor_step.recurrent_state,
         tensor_step.family_index,
         tensor_step.coeff_1,
@@ -462,6 +463,7 @@ def test_snapshot_combat_family_basis_rebuild_step_matches_eager_cpu():
         tensor_step.v_1,
         tensor_step.u_2,
         tensor_step.v_2,
+        tensor_step.stationary_health_cap,
         tensor_step.index_grid_indices(),
         tensor_step.dead_index_grid_indices(),
         tensor_step.neighbor_flat_offsets,
@@ -471,6 +473,7 @@ def test_snapshot_combat_family_basis_rebuild_step_matches_eager_cpu():
     assert torch.equal(tensor_actions, eager_actions)
     assert torch.equal(flat_positions, eager.flat_positions)
     assert torch.equal(health, eager.health)
+    assert torch.equal(stationary_steps, eager.stationary_steps)
     assert torch.allclose(recurrent_state, eager.recurrent_state)
     assert torch.equal(tensor_step.index_grid, eager.index_grid)
 
@@ -489,10 +492,11 @@ def test_snapshot_combat_family_basis_rebuild_step_matches_eager_for_multiple_st
 
     for _ in range(2):
         eager_actions = eager.step(movement='snapshot_combat', compact_dead=False, sync_positions=False)
-        flat_positions, health, recurrent_state, tensor_actions = snapshot_combat_step_tensors_family_basis_rebuild_grid(
+        flat_positions, health, stationary_steps, recurrent_state, tensor_actions = snapshot_combat_step_tensors_family_basis_rebuild_grid(
             tensor_step.index_grid,
             tensor_step.flat_positions,
             tensor_step.health,
+            tensor_step.stationary_steps,
             tensor_step.recurrent_state,
             tensor_step.family_index,
             tensor_step.coeff_1,
@@ -505,6 +509,7 @@ def test_snapshot_combat_family_basis_rebuild_step_matches_eager_for_multiple_st
             tensor_step.v_1,
             tensor_step.u_2,
             tensor_step.v_2,
+            tensor_step.stationary_health_cap,
             tensor_step.index_grid_indices(),
             tensor_step.dead_index_grid_indices(),
             tensor_step.neighbor_flat_offsets,
@@ -512,11 +517,13 @@ def test_snapshot_combat_family_basis_rebuild_step_matches_eager_for_multiple_st
         )
         tensor_step.flat_positions = flat_positions
         tensor_step.health = health
+        tensor_step.stationary_steps = stationary_steps
         tensor_step.recurrent_state = recurrent_state
 
         assert torch.equal(tensor_actions, eager_actions)
         assert torch.equal(tensor_step.flat_positions, eager.flat_positions)
         assert torch.equal(tensor_step.health, eager.health)
+        assert torch.equal(tensor_step.stationary_steps, eager.stationary_steps)
         assert torch.allclose(tensor_step.recurrent_state, eager.recurrent_state)
         assert torch.equal(tensor_step.index_grid, eager.index_grid)
 
@@ -536,10 +543,11 @@ def test_snapshot_combat_family_basis_rebuild_block_matches_eager_cpu():
 
     for _ in range(2):
         eager.step(movement='snapshot_combat', compact_dead=False, sync_positions=False)
-    flat_positions, health, recurrent_state = block_fn(
+    flat_positions, health, stationary_steps, recurrent_state = block_fn(
         tensor_step.index_grid,
         tensor_step.flat_positions,
         tensor_step.health,
+        tensor_step.stationary_steps,
         tensor_step.recurrent_state,
         tensor_step.family_index,
         tensor_step.coeff_1,
@@ -552,6 +560,7 @@ def test_snapshot_combat_family_basis_rebuild_block_matches_eager_cpu():
         tensor_step.v_1,
         tensor_step.u_2,
         tensor_step.v_2,
+        tensor_step.stationary_health_cap,
         tensor_step.index_grid_indices(),
         tensor_step.dead_index_grid_indices(),
         tensor_step.neighbor_flat_offsets,
@@ -560,8 +569,133 @@ def test_snapshot_combat_family_basis_rebuild_block_matches_eager_cpu():
 
     assert torch.equal(flat_positions, eager.flat_positions)
     assert torch.equal(health, eager.health)
+    assert torch.equal(stationary_steps, eager.stationary_steps)
     assert torch.allclose(recurrent_state, eager.recurrent_state)
     assert torch.equal(tensor_step.index_grid, eager.index_grid)
+
+
+def test_snapshot_combat_stationary_action_caps_health_cpu():
+    state = TensorRank1State.random(
+        cells=4,
+        height=8,
+        width=8,
+        families=1,
+        device=torch.device('cpu'),
+        initial_health=5,
+        stationary_health_cap=1,
+    )
+    state.base_weight_1.zero_()
+    state.base_weight_2.zero_()
+    state.refresh_base_weight_matmul_cache()
+    state.u_1.zero_()
+    state.v_1.zero_()
+    state.u_2.zero_()
+    state.v_2.zero_()
+    state.coeff_1.zero_()
+    state.coeff_2.zero_()
+    state.bias_1.zero_()
+    state.bias_2.fill_(-100)
+    state.bias_2[:, 0] = 100
+
+    health = state.health
+    stationary_steps = state.stationary_steps
+    flat_positions = state.flat_positions
+    for _ in range(3):
+        flat_positions, health, stationary_steps, _recurrent_state, actions = snapshot_combat_step_tensors_family_basis_rebuild_grid(
+            state.index_grid,
+            flat_positions,
+            health,
+            stationary_steps,
+            state.recurrent_state,
+            state.family_index,
+            state.coeff_1,
+            state.coeff_2,
+            state.bias_1,
+            state.bias_2,
+            state.base_weight_1_matmul,
+            state.base_weight_2_matmul,
+            state.u_1,
+            state.v_1,
+            state.u_2,
+            state.v_2,
+            state.stationary_health_cap,
+            state.index_grid_indices(),
+            state.dead_index_grid_indices(),
+            state.neighbor_flat_offsets,
+            state.direction_flat_deltas,
+        )
+
+    assert torch.equal(actions, torch.zeros_like(actions))
+    assert torch.equal(flat_positions, state.flat_positions)
+    assert torch.equal(health, torch.ones_like(health))
+    assert torch.equal(stationary_steps, torch.full_like(stationary_steps, 3))
+    assert state.index_grid.reshape(-1)[flat_positions].ge(0).all()
+
+
+def test_snapshot_combat_family_basis_sanitizes_nan_recurrent_state_cpu():
+    state = TensorRank1State.random(
+        cells=8,
+        height=8,
+        width=8,
+        families=2,
+        device=torch.device('cpu'),
+        initial_health=5,
+    )
+    state.recurrent_state.fill_(float('nan'))
+
+    _flat_positions, _health, _stationary_steps, recurrent_state, actions = snapshot_combat_step_tensors_family_basis_rebuild_grid(
+        state.index_grid,
+        state.flat_positions,
+        state.health,
+        state.stationary_steps,
+        state.recurrent_state,
+        state.family_index,
+        state.coeff_1,
+        state.coeff_2,
+        state.bias_1,
+        state.bias_2,
+        state.base_weight_1_matmul,
+        state.base_weight_2_matmul,
+        state.u_1,
+        state.v_1,
+        state.u_2,
+        state.v_2,
+        state.stationary_health_cap,
+        state.index_grid_indices(),
+        state.dead_index_grid_indices(),
+        state.neighbor_flat_offsets,
+        state.direction_flat_deltas,
+    )
+
+    assert torch.isfinite(recurrent_state).all()
+    assert actions.ge(0).all()
+    assert actions.lt(9).all()
+
+
+def test_snapshot_combat_kill_moves_attacker_and_rewards_health_cpu():
+    state = TensorRank1State.random(
+        cells=2,
+        height=8,
+        width=8,
+        families=1,
+        device=torch.device('cpu'),
+        initial_health=2,
+    )
+    state.positions = torch.tensor([[3, 3], [3, 4]], dtype=torch.long)
+    state.flat_positions = state.positions[:, 0] * state.grid_stride + state.positions[:, 1]
+    state.health = torch.tensor([2, 1], dtype=state.health.dtype)
+    state.stationary_steps.zero_()
+    state.rebuild_grids()
+
+    state.apply_snapshot_combat(
+        torch.tensor([3, 0], dtype=torch.long),
+        compact_dead=False,
+        sync_positions=False,
+    )
+
+    assert state.health.tolist() == [4, 0]
+    assert int(state.flat_positions[0].item()) == 3 * state.grid_stride + 4
+    assert int(state.index_grid.reshape(-1)[state.flat_positions[0]].item()) == 0
 
 
 def test_tensor_rank1_state_deferred_compaction_removes_dead_cells_from_grid():

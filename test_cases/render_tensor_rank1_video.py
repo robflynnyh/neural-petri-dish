@@ -48,16 +48,21 @@ def parse_args():
     parser.add_argument('--action-device', choices=('auto', 'cpu', 'cuda'), default='auto')
     parser.add_argument('--cell-size', type=positive_int, default=8)
     parser.add_argument('--status-height', type=positive_int, default=34)
-    parser.add_argument('--tensor-block-steps', type=positive_int, default=100)
+    parser.add_argument('--tensor-block-steps', type=positive_int, default=10)
     parser.add_argument('--tensor-family-capacity', type=positive_int, default=10)
     parser.add_argument('--tensor-cell-capacity', type=positive_int)
     parser.add_argument('--tensor-initial-health', type=positive_int, default=15)
     parser.add_argument('--tensor-wave-initial-health', type=positive_int, default=2)
+    parser.add_argument('--tensor-coeff-scale', type=float, default=npd.FACTORED_WAVE_COEFF_SCALE)
+    parser.add_argument('--tensor-stationary-health-cap', type=int, default=0)
     parser.add_argument('--tensor-static-refill-check-every', type=positive_int, default=100)
     parser.add_argument('--tensor-health-dtype', choices=tuple(HEALTH_DTYPES), default='int32')
     parser.add_argument('--tensor-compile-mode', choices=COMPILE_MODES, default='default')
     parser.add_argument('--tensor-matmul-precision', choices=MATMUL_PRECISIONS, default='high')
-    parser.add_argument('--no-tensor-cuda-graph', action='store_true')
+    parser.add_argument('--tensor-cuda-graph', dest='no_tensor_cuda_graph', action='store_false')
+    parser.add_argument('--no-tensor-cuda-graph', dest='no_tensor_cuda_graph', action='store_true')
+    parser.add_argument('--save-final-state', help='write final tensor state/debug payload with torch.save')
+    parser.set_defaults(no_tensor_cuda_graph=True)
     args = parser.parse_args()
     if args.tensor_static_refill_check_every % args.tensor_block_steps != 0:
         parser.error('--tensor-block-steps must divide --tensor-static-refill-check-every')
@@ -145,6 +150,8 @@ class TensorRank1VideoRun:
             initial_health=args.tensor_initial_health,
             cell_capacity=args.tensor_cell_capacity,
             health_dtype=resolve_health_dtype(args.tensor_health_dtype),
+            coeff_scale=args.tensor_coeff_scale,
+            stationary_health_cap=args.tensor_stationary_health_cap,
         )
         self.warm_compiled_shape(args.tensor_block_steps)
 
@@ -178,6 +185,7 @@ class TensorRank1VideoRun:
             self.active_family_count,
             count,
             initial_health=self.args.tensor_wave_initial_health,
+            coeff_scale=self.args.tensor_coeff_scale,
         )
         if self.state.family_capacity_version() != previous_family_version:
             self.graph_runners.clear()
@@ -298,6 +306,33 @@ class TensorRank1VideoRun:
             'waves_spawned': self.waves_spawned,
         }
 
+    def save_state(self, path, metrics):
+        synchronize(self.device)
+        state = {}
+        for field_name in self.state.__dataclass_fields__:
+            value = getattr(self.state, field_name)
+            if isinstance(value, torch.Tensor):
+                state[field_name] = value.detach().cpu()
+            else:
+                state[field_name] = value
+        payload = {
+            'args': vars(self.args),
+            'metrics': metrics,
+            'progress': {
+                'rounds': self.rounds,
+                'countdown': self.countdown,
+                'frame': self.frame,
+                'active_family_count': self.active_family_count,
+                'waves_spawned': self.waves_spawned,
+                'empty_refills': self.empty_refills,
+            },
+            'state': state,
+        }
+        path = Path(path)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        torch.save(payload, path)
+        return path
+
 
 def write_manifest(path, args, metrics):
     manifest = [
@@ -321,12 +356,15 @@ def write_manifest(path, args, metrics):
         f'tensor_block_steps: {args.tensor_block_steps}',
         f'tensor_family_capacity: {args.tensor_family_capacity}',
         f'tensor_health_dtype: {args.tensor_health_dtype}',
+        f'tensor_coeff_scale: {args.tensor_coeff_scale}',
+        f'tensor_stationary_health_cap: {args.tensor_stationary_health_cap}',
         f'tensor_compile_mode: {args.tensor_compile_mode}',
         f'tensor_matmul_precision: {args.tensor_matmul_precision}',
         f'cuda_graph_captures: {metrics["cuda_graph_captures"]}',
         f'family_capacity_final: {metrics["family_capacity_final"]}',
         f'active_cells_final: {metrics["active_cells_final"]}',
         f'waves_spawned: {metrics["waves_spawned"]}',
+        f'final_state: {metrics.get("final_state", "")}',
         f'empty_refills: {metrics["empty_refills"]}',
         '',
     ]
@@ -362,6 +400,9 @@ def main():
 
         elapsed = time.perf_counter() - started
         metrics = run.metrics(elapsed, frames_written, rendered_rounds, output)
+        if args.save_final_state:
+            state_path = run.save_state(args.save_final_state, metrics)
+            metrics['final_state'] = str(state_path)
 
     write_manifest(output, args, metrics)
     print(json.dumps(metrics, indent=2, sort_keys=True))

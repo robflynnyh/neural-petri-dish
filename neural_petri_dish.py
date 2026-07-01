@@ -1062,6 +1062,8 @@ def main_tensor_rank1(args):
         initial_health=args.tensor_initial_health,
         cell_capacity=args.tensor_cell_capacity,
         health_dtype=health_dtype,
+        coeff_scale=args.tensor_coeff_scale,
+        stationary_health_cap=args.tensor_stationary_health_cap,
     )
     active_family_count = 1
     rounds = 0
@@ -1112,6 +1114,7 @@ def main_tensor_rank1(args):
             active_family_count,
             count,
             initial_health=args.tensor_wave_initial_health,
+            coeff_scale=args.tensor_coeff_scale,
         )
         if state.family_capacity_version() != previous_family_version:
             graph_runner = None
@@ -1218,6 +1221,8 @@ def main_tensor_rank1(args):
             'renders': renders,
             'rounds': rounds,
             'snapshots': snapshots,
+            'tensor_coeff_scale': args.tensor_coeff_scale,
+            'tensor_stationary_health_cap': args.tensor_stationary_health_cap,
             'tensor_block_steps': block_steps,
             'waves_spawned': waves_spawned,
         }
@@ -1339,17 +1344,21 @@ if __name__ == '__main__':
     parser.add_argument('--metrics-json', help='write bounded-run metrics JSON for benchmark/debug runs')
     parser.add_argument('--no-render', action='store_true', help='do not render frames to the terminal')
     parser.add_argument('--frame-rate', type=float, default=FRAME_RATE, help='seconds to sleep between frames')
-    parser.add_argument('--tensor-block-steps', type=positive_int, default=100)
+    parser.add_argument('--tensor-block-steps', type=positive_int, default=10)
     parser.add_argument('--tensor-render-every', type=positive_int)
     parser.add_argument('--tensor-family-capacity', type=positive_int, default=10)
     parser.add_argument('--tensor-cell-capacity', type=positive_int)
     parser.add_argument('--tensor-initial-health', type=positive_int, default=15)
     parser.add_argument('--tensor-wave-initial-health', type=positive_int, default=2)
+    parser.add_argument('--tensor-coeff-scale', type=float, default=FACTORED_WAVE_COEFF_SCALE)
+    parser.add_argument('--tensor-stationary-health-cap', type=int, default=0)
     parser.add_argument('--tensor-static-refill-check-every', type=positive_int, default=100)
     parser.add_argument('--tensor-health-dtype', choices=('int64', 'int32'), default='int32')
     parser.add_argument('--tensor-compile-mode', choices=('default', 'reduce-overhead', 'max-autotune'), default='default')
     parser.add_argument('--tensor-matmul-precision', choices=('highest', 'high', 'medium'), default='high')
-    parser.add_argument('--no-tensor-cuda-graph', action='store_true')
+    parser.add_argument('--tensor-cuda-graph', dest='no_tensor_cuda_graph', action='store_false')
+    parser.add_argument('--no-tensor-cuda-graph', dest='no_tensor_cuda_graph', action='store_true')
+    parser.set_defaults(no_tensor_cuda_graph=True)
     args = parser.parse_args()
     if (
             args.engine == SIM_ENGINE_TENSOR_RANK1
