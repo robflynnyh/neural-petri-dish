@@ -210,6 +210,20 @@ def test_attack_intent_into_empty_square_misses_turn():
     assert attacker.pos == [4, 4]
 
 
+def test_stationary_action_damages_and_can_kill():
+    game = npd.Game(size=(8, 8))
+    game.add_cell(4, 4)
+    cell = game.get_cell(4, 4)
+    cell.health = 2.0
+    force_action(cell, 0)
+
+    for _ in range(4):
+        npd.step(game)
+
+    assert cell not in game.cells
+    assert game.grid[4, 4] == 0
+
+
 def test_lone_target_takes_extra_attack_damage():
     game = npd.Game(size=(8, 8))
     game.add_cell(4, 4)
@@ -445,7 +459,7 @@ def test_shared_rank1_base_updates_from_hp_weighted_survivors():
     assert torch.allclose(family.base_weight_2, torch.full_like(first.linear2.weight, 10.0))
 
 
-def test_round_transition_costs_survivor_health_before_wave_spawn():
+def test_round_transition_does_not_cost_survivor_health_before_wave_spawn():
     game = npd.Game(size=(6, 6), mutation_mode=npd.MUTATION_MODE_SHARED_RANK1_FACTORED)
     game.add_cell(2, 2)
     game.add_cell(2, 3)
@@ -457,9 +471,10 @@ def test_round_transition_costs_survivor_health_before_wave_spawn():
 
     assert countdown == npd.ROUNDTIME
     assert game.rounds == 1
-    assert first not in game.cells
+    assert first in game.cells
     assert second in game.cells
-    assert second.health == 1
+    assert first.health == 1
+    assert second.health == 2
 
 
 def test_batched_shared_rank1_actions_match_materialized_networks():

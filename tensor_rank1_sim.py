@@ -121,6 +121,12 @@ def apply_movement_health_cost(health, moved):
     return health - moved.to(torch.float32) * cost
 
 
+def apply_stationary_health_cost(health, stationary_steps, stationary_health_cost):
+    damage_stationary = (stationary_health_cost > 0) & (stationary_steps >= npd.STATIONARY_DAMAGE_AFTER_STEPS)
+    cost = stationary_health_cost.to(health.dtype)
+    return torch.where(damage_stationary, health - cost, health)
+
+
 def packed_actions_from_logits(logits):
     directions = logits[:, :DIRECTION_OUTPUT_DIM].argmax(dim=1)
     attacks = logits[:, ATTACK_OUTPUT_INDEX] > 0
@@ -420,9 +426,7 @@ def snapshot_combat_step_tensors_family_basis_rebuild_grid(
     new_flat_positions = torch.where(hits_empty | target_killed, target_flat_positions, flat_positions)
     stayed_put = active & (new_flat_positions == flat_positions)
     new_stationary_steps = torch.where(stayed_put, stationary_steps + 1, torch.zeros_like(stationary_steps))
-    stationary_cap = stationary_health_cap.to(health.dtype)
-    cap_stationary = (stationary_health_cap > 0) & (new_stationary_steps >= 3)
-    new_health = torch.where(cap_stationary, torch.minimum(new_health, stationary_cap), new_health)
+    new_health = apply_stationary_health_cost(new_health, new_stationary_steps, stationary_health_cap)
     new_stationary_steps = torch.where(new_health > 0, new_stationary_steps, torch.zeros_like(new_stationary_steps))
 
     alive = new_health > 0
@@ -961,6 +965,8 @@ class TensorRank1State:
         alive = self.health > 0
         if not bool(alive.any()):
             return
+        if npd.ROUND_TRANSITION_HEALTH_COST <= 0:
+            return
         transition_cost = torch.as_tensor(
             npd.ROUND_TRANSITION_HEALTH_COST,
             device=self.device,
@@ -1180,9 +1186,7 @@ class TensorRank1State:
             self.stationary_steps + 1,
             torch.zeros_like(self.stationary_steps),
         )
-        stationary_cap = self.stationary_health_cap.to(self.health.dtype)
-        cap_stationary = (self.stationary_health_cap > 0) & (self.stationary_steps >= 3)
-        self.health = torch.where(cap_stationary, torch.minimum(new_health, stationary_cap), new_health)
+        self.health = apply_stationary_health_cost(new_health, self.stationary_steps, self.stationary_health_cap)
         self.stationary_steps = torch.where(
             self.health > 0,
             self.stationary_steps,

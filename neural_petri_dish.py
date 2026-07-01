@@ -223,7 +223,7 @@ class Cell:
         self.rank1_coeff_1 = 0.0
         self.rank1_coeff_2 = 0.0
 
-        self.pos_list = []
+        self.stationary_steps = 0
 
         if genes is not None:
             self.rank1_family = genes.get('_rank1_family')
@@ -279,19 +279,6 @@ class Cell:
 
     def commit_forward_state(self, hidden):
         self.prev_state[:] = hidden
-
-        current_pos = (self.y, self.x)
-        self.pos_list.append(current_pos)
-        if len(self.pos_list) > 5:
-            del self.pos_list[:-5]
-        if len(self.pos_list) > 1:
-            same_count = 0
-            for el in self.pos_list[-5:-2]:
-                if el == current_pos:
-                    same_count += 1
-            if same_count > 1: # if the cell has been in the same location for 3 frames, its health goes to 1 # NOW 1
-                self.health = 1
-                self.pos_list = []
 
     def update_pos(self, pos):
         self.y = int(pos[0])
@@ -433,6 +420,8 @@ class Game():
         return False
 
     def apply_round_transition_health_cost(self):
+        if ROUND_TRANSITION_HEALTH_COST <= 0:
+            return
         for cell in list(self.cells):
             self.damage_cell(cell, ROUND_TRANSITION_HEALTH_COST)
         if self.cells_removed_this_step:
@@ -865,16 +854,31 @@ def planned_family_actions(game, cells):
     }
 
 
+def apply_stationary_health_cost(game, cell, old_y, old_x):
+    if STATIONARY_HEALTH_COST <= 0:
+        return
+    stride = game._cell_key_stride
+    if game.cells_by_pos.get(cell.y * stride + cell.x) is not cell:
+        return
+    if cell.y == old_y and cell.x == old_x:
+        cell.stationary_steps += 1
+    else:
+        cell.stationary_steps = 0
+    if cell.stationary_steps >= STATIONARY_DAMAGE_AFTER_STEPS:
+        game.damage_cell(cell, STATIONARY_HEALTH_COST)
+
+
 def apply_cell_action(game, cell, action):
     direction = action_direction(action)
-    if direction == 0:
-        return
-
-    attack_intent = action_is_attack(action)
     grid = game.grid
     index = game.cells_by_pos
     stride = game._cell_key_stride
     y, x = cell.y, cell.x
+    if direction == 0:
+        apply_stationary_health_cost(game, cell, y, x)
+        return
+
+    attack_intent = action_is_attack(action)
     dy, dx = DIRECTION_DELTAS[direction]
     new_y = y + dy
     new_x = x + dx
@@ -887,10 +891,12 @@ def apply_cell_action(game, cell, action):
                 grid[y, x] = 0
                 index.pop(y * stride + x, None)
                 game.cells_removed_this_step = True
+        apply_stationary_health_cost(game, cell, y, x)
         return
 
     if not attack_intent:
         if target_value != 0:
+            apply_stationary_health_cost(game, cell, y, x)
             return
         old_key = y * stride + x
         new_key = new_y * stride + new_x
@@ -906,9 +912,11 @@ def apply_cell_action(game, cell, action):
             grid[new_y, new_x] = 0
             index.pop(new_key, None)
             game.cells_removed_this_step = True
+        apply_stationary_health_cost(game, cell, y, x)
         return
 
     if target_value == 0:
+        apply_stationary_health_cost(game, cell, y, x)
         return
 
     ncell = index.get(new_y * stride + new_x, False)
@@ -917,6 +925,7 @@ def apply_cell_action(game, cell, action):
             grid[new_y, new_x] = -1
         else:
             grid[new_y, new_x] = 0
+        apply_stationary_health_cost(game, cell, y, x)
         return
 
     ncell.health -= attack_damage_for_target(game, new_y, new_x, cell)
@@ -942,6 +951,7 @@ def apply_cell_action(game, cell, action):
             grid[y, x] = 0
             index.pop(y * stride + x, None)
             game.cells_removed_this_step = True
+    apply_stationary_health_cost(game, cell, y, x)
 
 
 def step_sequential(game):
@@ -1030,8 +1040,10 @@ def init(game, num=2500):
     return game
 
 ROUNDTIME = 500
-ROUND_TRANSITION_HEALTH_COST = 1
+ROUND_TRANSITION_HEALTH_COST = 0
 MOVEMENT_HEALTH_COST = 0.1
+STATIONARY_HEALTH_COST = 1
+STATIONARY_DAMAGE_AFTER_STEPS = 3
 KILL_HEALTH_REWARD = 5
 PER_WAVE = 300
 MIN_WAVE = 250

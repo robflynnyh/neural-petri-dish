@@ -583,14 +583,14 @@ def test_snapshot_combat_family_basis_rebuild_block_matches_eager_cpu():
     assert torch.equal(tensor_step.index_grid, eager.index_grid)
 
 
-def test_snapshot_combat_stationary_action_caps_health_cpu():
+def test_snapshot_combat_stationary_action_damages_and_can_kill_cpu():
     state = TensorRank1State.random(
         cells=4,
         height=8,
         width=8,
         families=1,
         device=torch.device('cpu'),
-        initial_health=5,
+        initial_health=2,
         stationary_health_cap=1,
     )
     state.base_weight_1.zero_()
@@ -609,7 +609,7 @@ def test_snapshot_combat_stationary_action_caps_health_cpu():
     health = state.health
     stationary_steps = state.stationary_steps
     flat_positions = state.flat_positions
-    for _ in range(3):
+    for _ in range(4):
         flat_positions, health, stationary_steps, _recurrent_state, actions = snapshot_combat_step_tensors_family_basis_rebuild_grid(
             state.index_grid,
             flat_positions,
@@ -636,9 +636,9 @@ def test_snapshot_combat_stationary_action_caps_health_cpu():
 
     assert torch.equal(actions, torch.zeros_like(actions))
     assert torch.equal(flat_positions, state.flat_positions)
-    assert torch.equal(health, torch.ones_like(health))
-    assert torch.equal(stationary_steps, torch.full_like(stationary_steps, 3))
-    assert state.index_grid.reshape(-1)[flat_positions].ge(0).all()
+    assert torch.equal(health, torch.zeros_like(health))
+    assert torch.equal(stationary_steps, torch.zeros_like(stationary_steps))
+    assert state.index_grid.reshape(-1)[flat_positions].eq(-1).all()
 
 
 def test_snapshot_combat_family_basis_sanitizes_nan_recurrent_state_cpu():
@@ -1099,7 +1099,7 @@ def test_tensor_rank1_static_wave_grows_when_all_family_slots_are_live_cpu():
     assert_tensor_state_position_invariants(state)
 
 
-def test_tensor_rank1_round_transition_health_cost_updates_grid_cpu():
+def test_tensor_rank1_round_transition_health_cost_is_disabled_cpu():
     torch.manual_seed(123)
     state = TensorRank1State.random(
         cells=3,
@@ -1114,10 +1114,10 @@ def test_tensor_rank1_round_transition_health_cost_updates_grid_cpu():
 
     state.apply_round_transition_health_cost()
 
-    assert state.health.tolist() == [0, 0, 1]
-    assert int((state.health > 0).sum().item()) == 1
-    assert int(state.index_grid.reshape(-1)[state.flat_positions[0]].item()) == -1
-    assert int(state.index_grid.reshape(-1)[state.flat_positions[1]].item()) == -1
+    assert state.health.tolist() == [1, 1, 2]
+    assert int((state.health > 0).sum().item()) == 3
+    assert int(state.index_grid.reshape(-1)[state.flat_positions[0]].item()) == 0
+    assert int(state.index_grid.reshape(-1)[state.flat_positions[1]].item()) == 1
     assert_tensor_state_position_invariants(state)
 
 
@@ -1500,5 +1500,5 @@ def test_tensor_rank1_benchmark_normal_round_refill_uses_live_cell_count_cpu():
     assert metrics['per_wave'] == 5
     assert metrics['min_wave'] == 2
     assert metrics['empty_refills'] == 0
-    assert metrics['waves_spawned'] == 5
-    assert metrics['active_cells_final'] == 5
+    assert metrics['waves_spawned'] == 4
+    assert metrics['active_cells_final'] == 8
