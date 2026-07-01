@@ -1,6 +1,7 @@
 import numpy as np
 import torch
 import argparse
+import json
 import os
 from pathlib import Path
 import pickle
@@ -1066,6 +1067,10 @@ def main_tensor_rank1(args):
     rounds = 0
     countdown = ROUNDTIME
     frame = 0
+    renders = 0
+    snapshots = 0
+    waves_spawned = 0
+    empty_refills = 0
     graph_runner = None
     block_steps = max(int(args.tensor_block_steps), 1)
     render_every = args.tensor_render_every if args.tensor_render_every is not None else block_steps
@@ -1135,17 +1140,22 @@ def main_tensor_rank1(args):
 
     cursor_hidden = not args.no_render
     last_render_frame = None
+    started = time.perf_counter()
     if cursor_hidden:
         hide_cursor()
     try:
         while args.max_frames is None or frame < args.max_frames:
             if frame % args.tensor_static_refill_check_every == 0 and active_cell_count() == 0:
-                if spawn_wave(MIN_WAVE) == 0:
+                spawned = spawn_wave(MIN_WAVE)
+                waves_spawned += spawned
+                empty_refills += 1
+                if spawned == 0:
                     break
 
             if args.snapshot_dir and frame % args.snapshot_every == 0:
                 index_grid, health = tensor_snapshot()
                 write_tensor_snapshot(index_grid, health, size, rounds, countdown, frame, args.snapshot_dir)
+                snapshots += 1
             should_render = (
                 not args.no_render
                 and (last_render_frame is None or frame - last_render_frame >= render_every)
@@ -1154,11 +1164,7 @@ def main_tensor_rank1(args):
                 index_grid, health = tensor_snapshot()
                 draw_tensor_frame(index_grid, health, size, rounds, countdown, first_frame=(frame == 0))
                 last_render_frame = frame
-
-            if countdown == 0:
-                spawn_wave(max(PER_WAVE - active_cell_count(), MIN_WAVE))
-                countdown = ROUNDTIME
-                rounds += 1
+                renders += 1
 
             if args.frame_rate > 0:
                 time.sleep(args.frame_rate)
@@ -1170,9 +1176,38 @@ def main_tensor_rank1(args):
             run_steps(step_count)
             countdown -= step_count
             frame += step_count
+            if countdown == 0:
+                spawned = spawn_wave(max(PER_WAVE - active_cell_count(), MIN_WAVE))
+                waves_spawned += spawned
+                countdown = ROUNDTIME
+                rounds += 1
     finally:
         if cursor_hidden:
             show_cursor()
+    synchronize(device)
+    elapsed = time.perf_counter() - started
+    if args.metrics_json:
+        metrics = {
+            'active_cells_final': active_cell_count(),
+            'action_device': str(device),
+            'cell_capacity': state.cells,
+            'cuda_name': torch.cuda.get_device_name(device) if device.type == 'cuda' else '',
+            'elapsed_seconds': elapsed,
+            'empty_refills': empty_refills,
+            'engine': SIM_ENGINE_TENSOR_RANK1,
+            'family_capacity': state.families,
+            'frames': frame,
+            'frames_per_second': frame / elapsed if elapsed > 0 else 0.0,
+            'render_every': render_every,
+            'renders': renders,
+            'rounds': rounds,
+            'snapshots': snapshots,
+            'tensor_block_steps': block_steps,
+            'waves_spawned': waves_spawned,
+        }
+        metrics_path = Path(args.metrics_json)
+        metrics_path.parent.mkdir(parents=True, exist_ok=True)
+        metrics_path.write_text(json.dumps(metrics, indent=2, sort_keys=True) + '\n', encoding='utf-8')
 
 
 def main(args):
@@ -1285,6 +1320,7 @@ if __name__ == '__main__':
     parser.add_argument('--max-frames', type=positive_int, help='stop after this many frames')
     parser.add_argument('--snapshot-dir', help='write plain-text frame snapshots to this directory')
     parser.add_argument('--snapshot-every', type=positive_int, default=1, help='write one snapshot every N frames')
+    parser.add_argument('--metrics-json', help='write bounded-run metrics JSON for benchmark/debug runs')
     parser.add_argument('--no-render', action='store_true', help='do not render frames to the terminal')
     parser.add_argument('--frame-rate', type=float, default=FRAME_RATE, help='seconds to sleep between frames')
     parser.add_argument('--tensor-block-steps', type=positive_int, default=50)

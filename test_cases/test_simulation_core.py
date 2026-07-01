@@ -1,3 +1,4 @@
+import json
 import os
 from pathlib import Path
 import subprocess
@@ -437,6 +438,7 @@ def test_cli_bounded_run_writes_snapshots(tmp_path):
 
 def test_cli_tensor_engine_bounded_run_writes_snapshots(tmp_path):
     script = Path(__file__).resolve().parents[1] / 'neural_petri_dish.py'
+    metrics_path = tmp_path / 'metrics.json'
     result = subprocess.run(
         [
             sys.executable,
@@ -453,6 +455,8 @@ def test_cli_tensor_engine_bounded_run_writes_snapshots(tmp_path):
             '2',
             '--snapshot-dir',
             str(tmp_path),
+            '--metrics-json',
+            str(metrics_path),
             '--no-render',
             '--frame-rate',
             '0',
@@ -479,6 +483,11 @@ def test_cli_tensor_engine_bounded_run_writes_snapshots(tmp_path):
     assert 'Frame: 0' in first_snapshot
     assert 'Petri Dish' in first_snapshot
     assert '#' in first_snapshot
+    metrics = json.loads(metrics_path.read_text(encoding='utf-8'))
+    assert metrics['engine'] == npd.SIM_ENGINE_TENSOR_RANK1
+    assert metrics['frames'] == 6
+    assert metrics['snapshots'] == 3
+    assert metrics['renders'] == 0
 
 
 def test_cli_tensor_engine_help_exposes_render_cadence():
@@ -492,6 +501,7 @@ def test_cli_tensor_engine_help_exposes_render_cadence():
 
     assert result.returncode == 0, result.stderr
     assert '--tensor-render-every' in result.stdout
+    assert '--metrics-json' in result.stdout
 
 
 def test_video_renderer_writes_artifact_and_manifest(tmp_path):
