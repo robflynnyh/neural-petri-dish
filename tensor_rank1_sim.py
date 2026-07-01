@@ -35,6 +35,13 @@ ACTIVATION_LIMIT = 1.0e6
 LOGIT_LIMIT = 1.0e6
 
 
+def refresh_runtime_constants():
+    global KILL_REWARD, FOOD_REWARD, FOOD_INPUT_VALUE
+    KILL_REWARD = npd.KILL_HEALTH_REWARD
+    FOOD_REWARD = npd.FOOD_HEALTH_REWARD
+    FOOD_INPUT_VALUE = npd.FOOD_INPUT_VALUE
+
+
 def resolve_device(name):
     if name == 'cuda' and not torch.cuda.is_available():
         raise RuntimeError('CUDA requested but torch.cuda.is_available() is false')
@@ -419,6 +426,7 @@ def snapshot_combat_step_tensors_family_basis_rebuild_grid(
         health,
         stationary_steps,
         recurrent_state,
+        round_survival_steps,
         family_index,
         coeff_1,
         coeff_2,
@@ -435,6 +443,8 @@ def snapshot_combat_step_tensors_family_basis_rebuild_grid(
         dead_scatter_indices,
         neighbor_flat_offsets,
         direction_flat_deltas):
+    active = health > 0
+    round_survival_steps = round_survival_steps + active.to(round_survival_steps.dtype)
     inputs = torch.empty(flat_positions.shape[0], INPUT_DIM, device=index_grid.device)
     neighbor_indices = flat_positions[:, None] + neighbor_flat_offsets[None, :]
     index_flat = index_grid.reshape(-1)
@@ -472,7 +482,6 @@ def snapshot_combat_step_tensors_family_basis_rebuild_grid(
     attack_intents = action_attack_intents(actions)
     target_flat_positions = flat_positions + direction_flat_deltas[directions]
     target_indices = index_flat[target_flat_positions]
-    active = health > 0
     targeted = active & (directions != 0)
     move_intents = targeted & ~attack_intents
     attack_intents = targeted & attack_intents
@@ -495,6 +504,7 @@ def snapshot_combat_step_tensors_family_basis_rebuild_grid(
     target_health_after = health[valid_targets] - damage_received[valid_targets]
     target_survives = hits_occupied & (target_health_after > 0)
     target_killed = hits_occupied & (target_health_after <= 0)
+    lone_target_hits = hits_occupied & (attack_damage > BASE_ATTACK_DAMAGE)
     attacker_penalty = (hits_border | target_survives).to(health.dtype)
     attacker_reward = target_killed.to(health.dtype) * KILL_REWARD
     new_health = (health - damage_received - attacker_penalty + attacker_reward).clamp_max(MAX_HEALTH)
@@ -517,6 +527,7 @@ def snapshot_combat_step_tensors_family_basis_rebuild_grid(
     )
     owns_position = index_flat[new_flat_positions] == scatter_indices
     consumed_food = alive & owns_position & hits_empty & (food_flat[target_flat_positions] > 0)
+    move_success = alive & owns_position & hits_empty
     new_health = torch.where(
         consumed_food,
         (new_health + torch.as_tensor(FOOD_REWARD, device=index_grid.device, dtype=health.dtype)).clamp_max(MAX_HEALTH),
@@ -529,7 +540,21 @@ def snapshot_combat_step_tensors_family_basis_rebuild_grid(
         new_stationary_steps,
         torch.zeros_like(new_stationary_steps),
     )
-    return new_flat_positions, new_health, new_stationary_steps, hidden, actions
+    event_counts = torch.stack((
+        active.sum(),
+        move_intents.sum(),
+        move_success.sum(),
+        attack_intents.sum(),
+        hits_occupied.sum(),
+        target_killed.sum(),
+        lone_target_hits.sum(),
+        hits_border.sum(),
+        consumed_food.sum(),
+        (active & (new_health <= 0)).sum(),
+        stayed_put.sum(),
+        (new_health > 0).sum(),
+    )).to(torch.float32)
+    return new_flat_positions, new_health, new_stationary_steps, hidden, actions, round_survival_steps, event_counts
 
 
 def resolve_compile_mode(mode):
@@ -578,6 +603,7 @@ def family_basis_rebuild_snapshot_combat_block_tensors(block_steps):
             health,
             stationary_steps,
             recurrent_state,
+            round_survival_steps,
             family_index,
             coeff_1,
             coeff_2,
@@ -594,14 +620,16 @@ def family_basis_rebuild_snapshot_combat_block_tensors(block_steps):
             dead_scatter_indices,
             neighbor_flat_offsets,
             direction_flat_deltas):
+        total_event_counts = torch.zeros(12, device=health.device, dtype=torch.float32)
         for _ in range(block_steps):
-            flat_positions, health, stationary_steps, recurrent_state, _actions = snapshot_combat_step_tensors_family_basis_rebuild_grid(
+            flat_positions, health, stationary_steps, recurrent_state, _actions, round_survival_steps, event_counts = snapshot_combat_step_tensors_family_basis_rebuild_grid(
                 index_grid,
                 food_grid,
                 flat_positions,
                 health,
                 stationary_steps,
                 recurrent_state,
+                round_survival_steps,
                 family_index,
                 coeff_1,
                 coeff_2,
@@ -619,7 +647,8 @@ def family_basis_rebuild_snapshot_combat_block_tensors(block_steps):
                 neighbor_flat_offsets,
                 direction_flat_deltas,
             )
-        return flat_positions, health, stationary_steps, recurrent_state
+            total_event_counts = total_event_counts + event_counts
+        return flat_positions, health, stationary_steps, recurrent_state, round_survival_steps, total_event_counts
 
     return block_fn
 
@@ -655,21 +684,24 @@ class CudaGraphFamilyBasisBlockRunner:
         original_health = state.health.clone()
         original_stationary_steps = state.stationary_steps.clone()
         original_recurrent_state = state.recurrent_state.clone()
+        original_round_survival_steps = state.round_survival_steps.clone()
 
         with torch.cuda.graph(self.graph):
-            flat_positions, health, stationary_steps, recurrent_state = self.step_fn(
+            flat_positions, health, stationary_steps, recurrent_state, round_survival_steps, _event_counts = self.step_fn(
                 *state.family_basis_block_args()
             )
             state.flat_positions.copy_(flat_positions)
             state.health.copy_(health)
             state.stationary_steps.copy_(stationary_steps)
             state.recurrent_state.copy_(recurrent_state)
+            state.round_survival_steps.copy_(round_survival_steps)
         state.index_grid.copy_(original_index_grid)
         state.food_grid.copy_(original_food_grid)
         state.flat_positions.copy_(original_flat_positions)
         state.health.copy_(original_health)
         state.stationary_steps.copy_(original_stationary_steps)
         state.recurrent_state.copy_(original_recurrent_state)
+        state.round_survival_steps.copy_(original_round_survival_steps)
         synchronize(state.device)
 
     def replay(self):
@@ -1022,6 +1054,7 @@ class TensorRank1State:
             self.health,
             self.stationary_steps,
             self.recurrent_state,
+            self.round_survival_steps,
             self.family_index,
             self.coeff_1,
             self.coeff_2,
@@ -1620,7 +1653,10 @@ class TensorRank1State:
                 self.stationary_steps,
                 self.recurrent_state,
                 actions,
+                self.round_survival_steps,
+                event_counts,
             ) = step_fn(*self.family_basis_block_args())
+            return event_counts
         else:
             if rebuild_grid:
                 step_fn = compiled_rebuild_snapshot_combat_step_tensors(compile_mode)
@@ -1665,8 +1701,10 @@ class TensorRank1State:
             self.health,
             self.stationary_steps,
             self.recurrent_state,
+            self.round_survival_steps,
+            event_counts,
         ) = step_fn(*self.family_basis_block_args())
-        return None
+        return event_counts
 
 def benchmark_tensor_state(
         cells,
@@ -2024,7 +2062,8 @@ def benchmark_tensor_state(
                     compact_dead=(compact_every == 1),
                     sync_positions=sync_positions_each_step,
                 )
-            state.record_survival_steps(step_count)
+            if not (compiled_step and family_basis_step):
+                state.record_survival_steps(step_count)
             invalidate_active_cell_count()
             if checksum_tensor is not None:
                 checksum_tensor = checksum_tensor + actions[:checksum_actions].sum()

@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 import argparse
+import csv
 import json
 from pathlib import Path
 import sys
@@ -19,6 +20,7 @@ from tensor_rank1_sim import (
     MATMUL_PRECISIONS,
     CudaGraphFamilyBasisBlockRunner,
     TensorRank1State,
+    refresh_runtime_constants,
     resolve_device,
     resolve_health_dtype,
     synchronize,
@@ -26,6 +28,20 @@ from tensor_rank1_sim import (
 
 
 DEFAULT_OUTPUT = 'test_cases/artifacts/tensor_rank1_10k_rounds_every_1000.mp4'
+EVENT_COUNT_NAMES = (
+    'active_cell_steps',
+    'move_attempts',
+    'move_successes',
+    'attack_attempts',
+    'attack_hits',
+    'attack_kills',
+    'lone_target_hits',
+    'border_hits',
+    'food_eaten',
+    'deaths',
+    'stayed_put',
+    'alive_end_sum',
+)
 
 
 def positive_int(value):
@@ -55,6 +71,15 @@ def parse_args():
     parser.add_argument('--tensor-wave-initial-health', type=positive_int, default=2)
     parser.add_argument('--tensor-coeff-scale', type=float, default=npd.FACTORED_WAVE_COEFF_SCALE)
     parser.add_argument('--fitness-update-lr', type=float, default=npd.FITNESS_UPDATE_LR)
+    parser.add_argument('--movement-health-cost', type=float, default=npd.MOVEMENT_HEALTH_COST)
+    parser.add_argument('--stationary-health-cost', type=float, default=npd.STATIONARY_HEALTH_COST)
+    parser.add_argument('--stationary-damage-after-steps', type=positive_int, default=npd.STATIONARY_DAMAGE_AFTER_STEPS)
+    parser.add_argument('--food-health-reward', type=float, default=npd.FOOD_HEALTH_REWARD)
+    parser.add_argument('--kill-health-reward', type=float, default=npd.KILL_HEALTH_REWARD)
+    parser.add_argument('--round-transition-health-cost', type=float, default=npd.ROUND_TRANSITION_HEALTH_COST)
+    parser.add_argument('--per-wave', type=positive_int, default=npd.PER_WAVE)
+    parser.add_argument('--min-wave', type=positive_int, default=npd.MIN_WAVE)
+    parser.add_argument('--roundtime', type=positive_int, default=npd.ROUNDTIME)
     parser.add_argument('--tensor-stationary-health-cap', type=int, default=1)
     parser.add_argument('--tensor-static-refill-check-every', type=positive_int, default=100)
     parser.add_argument('--tensor-health-dtype', choices=tuple(HEALTH_DTYPES), default='float32')
@@ -129,6 +154,16 @@ class TensorRank1VideoRun:
     def __init__(self, args):
         npd.seed_all(args.seed)
         npd.FITNESS_UPDATE_LR = args.fitness_update_lr
+        npd.MOVEMENT_HEALTH_COST = args.movement_health_cost
+        npd.STATIONARY_HEALTH_COST = args.stationary_health_cost
+        npd.STATIONARY_DAMAGE_AFTER_STEPS = args.stationary_damage_after_steps
+        npd.FOOD_HEALTH_REWARD = args.food_health_reward
+        npd.KILL_HEALTH_REWARD = args.kill_health_reward
+        npd.ROUND_TRANSITION_HEALTH_COST = args.round_transition_health_cost
+        npd.PER_WAVE = args.per_wave
+        npd.MIN_WAVE = args.min_wave
+        npd.ROUNDTIME = args.roundtime
+        refresh_runtime_constants()
         self.args = args
         size = npd.terminal_size(args.size)
         device_name = args.action_device
@@ -146,11 +181,16 @@ class TensorRank1VideoRun:
         self.active_family_count = 1
         self.last_active_cells = None
         self.graph_runners = {}
+        self.behavior_totals = {name: 0 for name in EVENT_COUNT_NAMES}
+        self.round_event_counts = {name: 0 for name in EVENT_COUNT_NAMES}
+        self.round_summaries = []
 
         if args.tensor_matmul_precision is not None:
             torch.set_float32_matmul_precision(args.tensor_matmul_precision)
         board_capacity = (size.lines - 2) * size.columns
         initial_cells = min(args.initial_cells, board_capacity)
+        self.round_start_frame = 0
+        self.round_start_active_cells = initial_cells
         self.state = TensorRank1State.fixed_capacity(
             active_cells=initial_cells,
             height=size.lines,
@@ -189,6 +229,49 @@ class TensorRank1VideoRun:
     def apply_spawn_count(self, spawned):
         if self.last_active_cells is not None:
             self.last_active_cells += int(spawned)
+
+    def record_event_counts(self, event_counts):
+        if event_counts is None:
+            return
+        counts = event_counts.detach().cpu().to(torch.long).tolist()
+        for name, value in zip(EVENT_COUNT_NAMES, counts):
+            value = int(value)
+            self.behavior_totals[name] += value
+            self.round_event_counts[name] += value
+
+    def record_round_summary(self):
+        active_end = self.active_cell_count()
+        participants = self.state.round_participants.detach().cpu().numpy().astype(bool)
+        survival = self.state.round_survival_steps.detach().cpu().numpy()
+        participant_survival = survival[participants]
+        if participant_survival.size:
+            survival_mean = float(participant_survival.mean())
+            survival_max = float(participant_survival.max())
+            survival_std = float(participant_survival.std())
+            survival_full_count = int((participant_survival >= npd.ROUNDTIME).sum())
+        else:
+            survival_mean = 0.0
+            survival_max = 0.0
+            survival_std = 0.0
+            survival_full_count = 0
+        summary = {
+            'round': int(self.rounds),
+            'start_frame': int(self.round_start_frame),
+            'end_frame': int(self.frame),
+            'frames_elapsed': int(self.frame - self.round_start_frame),
+            'countdown_remaining': int(self.countdown),
+            'started_cells': int(self.round_start_active_cells),
+            'ended_cells': int(active_end),
+            'participant_cells': int(participant_survival.size),
+            'survival_mean': survival_mean,
+            'survival_max': survival_max,
+            'survival_std': survival_std,
+            'survival_full_count': survival_full_count,
+            'food_remaining': int(self.state.food_grid.sum().item()),
+        }
+        summary.update({name: int(self.round_event_counts[name]) for name in EVENT_COUNT_NAMES})
+        self.round_summaries.append(summary)
+        self.round_event_counts = {name: 0 for name in EVENT_COUNT_NAMES}
 
     def spawn_wave(self, count):
         previous_family_version = self.state.family_capacity_version()
@@ -230,22 +313,25 @@ class TensorRank1VideoRun:
         if self.device.type == 'cuda':
             if use_cuda_graph and not self.args.no_tensor_cuda_graph:
                 self.graph_runner(step_count).replay()
+                event_counts = None
             else:
-                self.state.compiled_snapshot_combat_steps(
+                event_counts = self.state.compiled_snapshot_combat_steps(
                     step_count,
                     rebuild_grid=True,
                     family_basis=True,
                     compile_mode=self.args.tensor_compile_mode,
                 )
+            self.record_event_counts(event_counts)
         else:
             for _ in range(step_count):
+                self.state.record_survival_steps(1)
                 self.state.step(movement='snapshot_combat', compact_dead=False, sync_positions=False)
-        self.state.record_survival_steps(step_count)
         self.invalidate_active_count()
 
     def finish_round_if_needed(self):
         if self.countdown != 0:
             return
+        self.record_round_summary()
         self.state.apply_round_transition_health_cost()
         self.invalidate_active_count()
         wave_size = max(npd.PER_WAVE - self.active_cell_count(), npd.MIN_WAVE)
@@ -253,6 +339,8 @@ class TensorRank1VideoRun:
         self.state.spawn_fixed_food()
         self.countdown = npd.ROUNDTIME
         self.rounds += 1
+        self.round_start_frame = self.frame
+        self.round_start_active_cells = self.active_cell_count()
 
     def advance_unrendered_round(self):
         while self.countdown > 0:
@@ -320,11 +408,30 @@ class TensorRank1VideoRun:
             'frames_written': frames_written,
             'full_simulation_frames': self.frame,
             'fitness_update_lr': float(npd.FITNESS_UPDATE_LR),
+            'kill_health_reward': float(npd.KILL_HEALTH_REWARD),
+            'min_wave': int(npd.MIN_WAVE),
+            'movement_health_cost': float(npd.MOVEMENT_HEALTH_COST),
+            'per_wave': int(npd.PER_WAVE),
+            'round_transition_health_cost': float(npd.ROUND_TRANSITION_HEALTH_COST),
+            'roundtime': int(npd.ROUNDTIME),
+            'stationary_damage_after_steps': int(npd.STATIONARY_DAMAGE_AFTER_STEPS),
+            'stationary_health_cost': float(npd.STATIONARY_HEALTH_COST),
+            'behavior_totals': dict(self.behavior_totals),
+            'round_metrics_csv': str(Path(output).with_suffix(Path(output).suffix + '.round_metrics.csv')),
             'output': str(output),
             'rounds_completed': self.rounds,
             'rendered_rounds': rendered_rounds,
             'waves_spawned': self.waves_spawned,
         }
+
+    def write_round_metrics(self, path):
+        if not self.round_summaries:
+            return
+        fieldnames = list(self.round_summaries[0])
+        with path.open('w', encoding='utf-8', newline='') as handle:
+            writer = csv.DictWriter(handle, fieldnames=fieldnames)
+            writer.writeheader()
+            writer.writerows(self.round_summaries)
 
     def save_state(self, path, metrics):
         synchronize(self.device)
@@ -382,14 +489,23 @@ def write_manifest(path, args, metrics):
         f'tensor_compile_mode: {args.tensor_compile_mode}',
         f'tensor_matmul_precision: {args.tensor_matmul_precision}',
         f'fitness_update_lr: {metrics["fitness_update_lr"]}',
+        f'movement_health_cost: {metrics["movement_health_cost"]}',
+        f'stationary_health_cost: {metrics["stationary_health_cost"]}',
+        f'stationary_damage_after_steps: {metrics["stationary_damage_after_steps"]}',
+        f'round_transition_health_cost: {metrics["round_transition_health_cost"]}',
+        f'roundtime: {metrics["roundtime"]}',
+        f'per_wave: {metrics["per_wave"]}',
+        f'min_wave: {metrics["min_wave"]}',
         f'food_per_round: {metrics["food_per_round"]}',
         f'food_health_reward: {metrics["food_health_reward"]}',
+        f'kill_health_reward: {metrics["kill_health_reward"]}',
         f'food_remaining_final: {metrics["food_remaining_final"]}',
         f'cuda_graph_captures: {metrics["cuda_graph_captures"]}',
         f'family_capacity_final: {metrics["family_capacity_final"]}',
         f'active_cells_final: {metrics["active_cells_final"]}',
         f'waves_spawned: {metrics["waves_spawned"]}',
         f'final_state: {metrics.get("final_state", "")}',
+        f'round_metrics_csv: {metrics["round_metrics_csv"]}',
         f'empty_refills: {metrics["empty_refills"]}',
         f'early_ended_rounds: {metrics["early_ended_rounds"]}',
         '',
@@ -412,7 +528,7 @@ def main():
     font = ImageFont.load_default()
 
     started = time.perf_counter()
-    with torch.no_grad(), imageio.get_writer(output, fps=args.fps, macro_block_size=1) as writer:
+    with torch.inference_mode(), imageio.get_writer(output, fps=args.fps, macro_block_size=1) as writer:
         run = TensorRank1VideoRun(args)
         while run.rounds < args.rounds:
             if run.rounds in rounds_to_render_set:
@@ -426,6 +542,7 @@ def main():
 
         elapsed = time.perf_counter() - started
         metrics = run.metrics(elapsed, frames_written, rendered_rounds, output)
+        run.write_round_metrics(Path(metrics['round_metrics_csv']))
         if args.save_final_state:
             state_path = run.save_state(args.save_final_state, metrics)
             metrics['final_state'] = str(state_path)

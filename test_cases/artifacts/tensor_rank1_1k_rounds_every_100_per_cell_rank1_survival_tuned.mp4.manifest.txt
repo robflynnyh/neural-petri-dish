@@ -1,0 +1,44 @@
+Neural Petri Dish tensor rank-1 long-run video artifact
+
+output: test_cases/artifacts/tensor_rank1_1k_rounds_every_100_per_cell_rank1_survival_tuned.mp4
+elapsed_seconds: 287.155639
+rounds_requested: 1000
+rounds_completed: 1000
+render_rounds: 10
+round_stride: 100
+rendered_rounds: 0,100,200,300,400,500,600,700,800,900
+frames_written: 5000
+full_simulation_frames: 499190
+fps: 24
+size: 60x80
+initial_cells: 2500
+seed: 7
+action_device: cuda
+cuda_name: NVIDIA RTX A4500
+tensor_block_steps: 10
+tensor_family_capacity: 12
+tensor_health_dtype: float32
+tensor_coeff_scale: 3.0
+tensor_stationary_health_cap: 1
+tensor_compile_mode: default
+tensor_matmul_precision: high
+fitness_update_lr: 1.5
+movement_health_cost: 0.02
+stationary_health_cost: 1.0
+stationary_damage_after_steps: 8
+round_transition_health_cost: 0.0
+roundtime: 500
+per_wave: 900
+min_wave: 700
+food_per_round: 25
+food_health_reward: 5.0
+kill_health_reward: 5.0
+food_remaining_final: 25
+cuda_graph_captures: 0
+family_capacity_final: 12
+active_cells_final: 900
+waves_spawned: 875949
+final_state: test_cases/artifacts/tensor_rank1_1k_rounds_every_100_per_cell_rank1_survival_tuned.final_state.pt
+round_metrics_csv: test_cases/artifacts/tensor_rank1_1k_rounds_every_100_per_cell_rank1_survival_tuned.mp4.round_metrics.csv
+empty_refills: 0
+early_ended_rounds: 13
