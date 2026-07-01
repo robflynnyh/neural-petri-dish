@@ -1341,7 +1341,7 @@ if __name__ == '__main__':
     parser.add_argument('--frame-rate', type=float, default=FRAME_RATE, help='seconds to sleep between frames')
     parser.add_argument('--tensor-block-steps', type=positive_int, default=100)
     parser.add_argument('--tensor-render-every', type=positive_int)
-    parser.add_argument('--tensor-family-capacity', type=positive_int, default=7)
+    parser.add_argument('--tensor-family-capacity', type=positive_int, default=10)
     parser.add_argument('--tensor-cell-capacity', type=positive_int)
     parser.add_argument('--tensor-initial-health', type=positive_int, default=15)
     parser.add_argument('--tensor-wave-initial-health', type=positive_int, default=2)

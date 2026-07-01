@@ -43,7 +43,7 @@ def parse_args():
     parser.add_argument('--height', type=positive_int, default=60)
     parser.add_argument('--width', type=positive_int, default=80)
     parser.add_argument('--families', type=positive_int, default=1)
-    parser.add_argument('--family-capacity', type=positive_int, default=7)
+    parser.add_argument('--family-capacity', type=positive_int, default=10)
     parser.add_argument('--cell-capacity', type=positive_int)
     parser.add_argument('--initial-health', type=positive_int, default=15)
     parser.add_argument('--health-dtype', choices=tuple(HEALTH_DTYPES), default='int32')

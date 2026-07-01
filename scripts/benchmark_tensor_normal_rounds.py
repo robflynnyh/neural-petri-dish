@@ -45,7 +45,7 @@ def parse_args():
     parser.add_argument('--per-wave', type=positive_int, default=npd.PER_WAVE)
     parser.add_argument('--min-wave', type=positive_int, default=npd.MIN_WAVE)
     parser.add_argument('--wave-initial-health', type=positive_int, default=2)
-    parser.add_argument('--family-capacity', type=positive_int, default=7)
+    parser.add_argument('--family-capacity', type=positive_int, default=10)
     parser.add_argument('--cell-capacity', type=positive_int)
     parser.add_argument('--static-refill-check-every', type=positive_int, default=100)
     parser.add_argument('--health-dtype', choices=tuple(HEALTH_DTYPES), default='int32')

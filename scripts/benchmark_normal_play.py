@@ -38,7 +38,7 @@ def parse_args():
     parser.add_argument('--batched-min-family-size', type=positive_int, default=4096)
     parser.add_argument('--tensor-initial-health', type=positive_int, default=15)
     parser.add_argument('--tensor-wave-initial-health', type=positive_int, default=2)
-    parser.add_argument('--tensor-family-capacity', type=positive_int, default=7)
+    parser.add_argument('--tensor-family-capacity', type=positive_int, default=10)
     parser.add_argument('--tensor-cell-capacity', type=positive_int)
     parser.add_argument('--tensor-static-refill-check-every', type=positive_int, default=100)
     parser.add_argument('--tensor-health-dtype', choices=tuple(HEALTH_DTYPES), default='int32')
