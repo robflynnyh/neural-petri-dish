@@ -380,10 +380,10 @@ class Game():
         stride = self._cell_key_stride
         self.cells = [cell for cell in self.cells if index.get(cell.y * stride + cell.x) is cell]
 
-    def damage_cell(self, cell):
+    def damage_cell(self, cell, amount=1):
         if cell == False or self.get_cell(*cell.pos) is not cell:
             return False
-        cell.health -= 1
+        cell.health -= amount
         if cell.health <= 0:
             self.remove_cell(*cell.pos)
             return True
@@ -391,7 +391,7 @@ class Game():
 
     def apply_round_transition_health_cost(self):
         for cell in list(self.cells):
-            self.damage_cell(cell)
+            self.damage_cell(cell, ROUND_TRANSITION_HEALTH_COST)
         if self.cells_removed_this_step:
             self.compact_cells()
             self.cells_removed_this_step = False
@@ -1023,6 +1023,7 @@ def init(game, num=2500):
     return game
 
 ROUNDTIME = 500
+ROUND_TRANSITION_HEALTH_COST = 2
 PER_WAVE = 300
 MIN_WAVE = 250
 MAX_TOTAL = 1000

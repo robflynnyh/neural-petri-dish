@@ -363,7 +363,7 @@ def test_round_transition_costs_survivor_health_before_wave_spawn():
     assert game.rounds == 1
     assert first not in game.cells
     assert second in game.cells
-    assert second.health == 2
+    assert second.health == 1
 
 
 def test_batched_shared_rank1_actions_match_materialized_networks():

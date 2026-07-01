@@ -877,7 +877,12 @@ class TensorRank1State:
         alive = self.health > 0
         if not bool(alive.any()):
             return
-        self.health = torch.where(alive, self.health - 1, self.health)
+        transition_cost = torch.as_tensor(
+            npd.ROUND_TRANSITION_HEALTH_COST,
+            device=self.device,
+            dtype=self.health.dtype,
+        )
+        self.health = torch.where(alive, (self.health - transition_cost).clamp_min(0), self.health)
         self.stationary_steps = torch.where(
             self.health > 0,
             self.stationary_steps,

@@ -951,9 +951,10 @@ def test_tensor_rank1_round_transition_health_cost_updates_grid_cpu():
 
     state.apply_round_transition_health_cost()
 
-    assert state.health.tolist() == [0, 1, 2]
-    assert int((state.health > 0).sum().item()) == 2
+    assert state.health.tolist() == [0, 0, 1]
+    assert int((state.health > 0).sum().item()) == 1
     assert int(state.index_grid.reshape(-1)[state.flat_positions[0]].item()) == -1
+    assert int(state.index_grid.reshape(-1)[state.flat_positions[1]].item()) == -1
     assert_tensor_state_position_invariants(state)
 
 
@@ -1050,10 +1051,10 @@ def test_tensor_rank1_benchmark_static_capacity_cpu():
         warmup_steps=0,
         movement='snapshot_combat',
         device=torch.device('cpu'),
-        initial_health=5,
+        initial_health=20,
         wave_every=1,
         wave_size=2,
-        wave_initial_health=5,
+        wave_initial_health=20,
         compact_every=0,
         checksum_actions=0,
         static_capacity=True,
@@ -1336,5 +1337,5 @@ def test_tensor_rank1_benchmark_normal_round_refill_uses_live_cell_count_cpu():
     assert metrics['per_wave'] == 5
     assert metrics['min_wave'] == 2
     assert metrics['empty_refills'] == 0
-    assert metrics['waves_spawned'] == 5
+    assert metrics['waves_spawned'] == 10
     assert metrics['active_cells_final'] == 5
