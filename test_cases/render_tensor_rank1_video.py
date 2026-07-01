@@ -191,6 +191,8 @@ class TensorRank1VideoRun:
         initial_cells = min(args.initial_cells, board_capacity)
         self.round_start_frame = 0
         self.round_start_active_cells = initial_cells
+        self.round_ended_early = False
+        self.round_early_countdown_remaining = 0
         self.state = TensorRank1State.fixed_capacity(
             active_cells=initial_cells,
             height=size.lines,
@@ -260,6 +262,8 @@ class TensorRank1VideoRun:
             'end_frame': int(self.frame),
             'frames_elapsed': int(self.frame - self.round_start_frame),
             'countdown_remaining': int(self.countdown),
+            'ended_early': int(self.round_ended_early),
+            'early_countdown_remaining': int(self.round_early_countdown_remaining),
             'started_cells': int(self.round_start_active_cells),
             'ended_cells': int(active_end),
             'participant_cells': int(participant_survival.size),
@@ -270,6 +274,20 @@ class TensorRank1VideoRun:
             'food_remaining': int(self.state.food_grid.sum().item()),
         }
         summary.update({name: int(self.round_event_counts[name]) for name in EVENT_COUNT_NAMES})
+        active_steps = max(1, summary['active_cell_steps'])
+        participants_count = max(1, summary['participant_cells'])
+        summary.update({
+            'survivor_fraction': float(summary['ended_cells'] / participants_count),
+            'full_survivor_fraction': float(summary['survival_full_count'] / participants_count),
+            'food_eaten_per_cell': float(summary['food_eaten'] / participants_count),
+            'food_eaten_per_100k_active_steps': float(100000.0 * summary['food_eaten'] / active_steps),
+            'move_success_rate': float(summary['move_successes'] / active_steps),
+            'attack_hit_rate': float(summary['attack_hits'] / active_steps),
+            'attack_kill_rate': float(summary['attack_kills'] / active_steps),
+            'border_hit_rate': float(summary['border_hits'] / active_steps),
+            'death_rate': float(summary['deaths'] / active_steps),
+            'stayed_put_rate': float(summary['stayed_put'] / active_steps),
+        })
         self.round_summaries.append(summary)
         self.round_event_counts = {name: 0 for name in EVENT_COUNT_NAMES}
 
@@ -291,6 +309,8 @@ class TensorRank1VideoRun:
         return self.active_cell_count() == 0
 
     def end_round_early(self):
+        self.round_ended_early = True
+        self.round_early_countdown_remaining = self.countdown
         self.countdown = 0
         self.early_ended_rounds += 1
 
@@ -341,6 +361,8 @@ class TensorRank1VideoRun:
         self.rounds += 1
         self.round_start_frame = self.frame
         self.round_start_active_cells = self.active_cell_count()
+        self.round_ended_early = False
+        self.round_early_countdown_remaining = 0
 
     def advance_unrendered_round(self):
         while self.countdown > 0:
@@ -403,6 +425,7 @@ class TensorRank1VideoRun:
             'early_ended_rounds': self.early_ended_rounds,
             'family_capacity_final': self.state.families,
             'food_per_round': int(npd.FOOD_PER_ROUND),
+            'food_eaten_max_possible': int(npd.FOOD_PER_ROUND * self.rounds),
             'food_health_reward': float(npd.FOOD_HEALTH_REWARD),
             'food_remaining_final': int(self.state.food_grid.sum().item()),
             'frames_written': frames_written,
@@ -497,6 +520,7 @@ def write_manifest(path, args, metrics):
         f'per_wave: {metrics["per_wave"]}',
         f'min_wave: {metrics["min_wave"]}',
         f'food_per_round: {metrics["food_per_round"]}',
+        f'food_eaten_max_possible: {metrics["food_eaten_max_possible"]}',
         f'food_health_reward: {metrics["food_health_reward"]}',
         f'kill_health_reward: {metrics["kill_health_reward"]}',
         f'food_remaining_final: {metrics["food_remaining_final"]}',

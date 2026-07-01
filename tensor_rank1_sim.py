@@ -126,11 +126,16 @@ def refresh_food_overlay(grid, food_grid):
 def clear_consumed_food(food_grid, target_flat_positions, consumed_food):
     if food_grid.numel() == 0:
         return
-    food_grid.reshape(-1)[target_flat_positions] = torch.where(
-        consumed_food,
-        torch.zeros_like(target_flat_positions, dtype=food_grid.dtype),
-        food_grid.reshape(-1)[target_flat_positions],
+    food_flat = food_grid.reshape(-1)
+    clear_flags = torch.zeros(food_flat.shape, device=food_grid.device, dtype=torch.int8)
+    clear_flags.scatter_reduce_(
+        0,
+        target_flat_positions,
+        consumed_food.to(clear_flags.dtype),
+        reduce='amax',
+        include_self=True,
     )
+    food_flat.copy_(torch.where(clear_flags.bool(), torch.zeros_like(food_flat), food_flat))
 
 
 def flatten_base_weight_1_for_matmul(base_weight_1):

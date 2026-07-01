@@ -896,3 +896,16 @@ def test_tensor_rank1_edge_diagnostics_cpu_smoke(tmp_path):
     assert all(row['steps'] == npd.ROUNDTIME for row in rows)
     assert all('border_hit_rate_per_move' in row for row in rows)
     assert result.stdout.count('"coeff_scale"') == 2
+
+
+def test_tensor_rank1_clear_consumed_food_handles_duplicate_targets():
+    import tensor_rank1_sim as rank1
+
+    food_grid = torch.zeros(3, 5, dtype=torch.int8)
+    food_grid.reshape(-1)[7] = 1
+    targets = torch.tensor([7, 7, 8], dtype=torch.long)
+    consumed = torch.tensor([False, True, False])
+
+    rank1.clear_consumed_food(food_grid, targets, consumed)
+
+    assert int(food_grid.reshape(-1)[7]) == 0
