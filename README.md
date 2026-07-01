@@ -93,6 +93,13 @@ python scripts/benchmark_normal_play.py --action-backend sequential --action-dev
   python scripts/benchmark_normal_play.py --engine tensor_rank1 --action-device cuda
 ```
 
+Run the simulator CLI with the GPU-resident tensor engine:
+
+```bash
+/store/store5/software/simple-gpu-schedule/with-gpu any --idle-seconds 5 -- \
+  python neural_petri_dish.py --engine tensor_rank1 --action-device cuda
+```
+
 Estimate the normal-size round workload on the fast GPU-resident rank-1 tensor
 engine. This is a debug projection for the intended simulator engine path; the
 current interactive `Game`/`Cell` normal-play loop is still measured with

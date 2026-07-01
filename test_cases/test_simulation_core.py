@@ -435,6 +435,52 @@ def test_cli_bounded_run_writes_snapshots(tmp_path):
     assert '#' in first_snapshot
 
 
+def test_cli_tensor_engine_bounded_run_writes_snapshots(tmp_path):
+    script = Path(__file__).resolve().parents[1] / 'neural_petri_dish.py'
+    result = subprocess.run(
+        [
+            sys.executable,
+            str(script),
+            '--engine',
+            npd.SIM_ENGINE_TENSOR_RANK1,
+            '--action-device',
+            'cpu',
+            '--max-frames',
+            '6',
+            '--tensor-block-steps',
+            '2',
+            '--snapshot-every',
+            '2',
+            '--snapshot-dir',
+            str(tmp_path),
+            '--no-render',
+            '--frame-rate',
+            '0',
+            '--size',
+            '8x12',
+            '--initial-cells',
+            '10',
+            '--seed',
+            '7',
+        ],
+        capture_output=True,
+        text=True,
+        timeout=20,
+    )
+
+    assert result.returncode == 0, result.stderr
+    snapshots = sorted(tmp_path.glob('frame_*.txt'))
+    assert [path.name for path in snapshots] == [
+        'frame_00000.txt',
+        'frame_00002.txt',
+        'frame_00004.txt',
+    ]
+    first_snapshot = snapshots[0].read_text(encoding='utf-8')
+    assert 'Frame: 0' in first_snapshot
+    assert 'Petri Dish' in first_snapshot
+    assert '#' in first_snapshot
+
+
 def test_video_renderer_writes_artifact_and_manifest(tmp_path):
     script = Path(__file__).resolve().parent / 'render_video.py'
     output = tmp_path / 'preview.mp4'

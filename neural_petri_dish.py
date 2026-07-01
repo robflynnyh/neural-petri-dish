@@ -109,6 +109,9 @@ DEFAULT_MUTATION_MODE = MUTATION_MODE_SHARED_RANK1_FACTORED
 ACTION_BACKEND_SEQUENTIAL = 'sequential'
 ACTION_BACKEND_FAMILY_BATCHED = 'family_batched'
 ACTION_BACKENDS = (ACTION_BACKEND_SEQUENTIAL, ACTION_BACKEND_FAMILY_BATCHED)
+SIM_ENGINE_GAME = 'game'
+SIM_ENGINE_TENSOR_RANK1 = 'tensor_rank1'
+SIM_ENGINES = (SIM_ENGINE_GAME, SIM_ENGINE_TENSOR_RANK1)
 DIRECTION_DELTAS = (
     (0, 0),   # stationary
     (-1, 0),  # up
@@ -505,6 +508,19 @@ def render_grid(game, styled=True):
     return '\n'.join(rows)
 
 
+def render_tensor_grid(index_grid, size, styled=True):
+    rows = []
+    for row in range(2, size.lines):
+        pstring = [BLANK if styled else ' '] * size.columns
+        index_row = index_grid[row]
+        for col in range(2, size.columns + 2):
+            if index_row[col] >= 0:
+                color = int((87 - 4 * np.sum(index_grid[row-1:row+2, col-1:col+2] >= 0)) % 255)
+                pstring[col - 2] = f'{fg(color)}{X}{fg.rs}' if styled else '#'
+        rows.append(''.join(pstring))
+    return '\n'.join(rows)
+
+
 def print_grid(game):
     print(render_grid(game))
 
@@ -551,6 +567,31 @@ def status_line(game, countdown, styled=True):
     )
 
 
+def tensor_status_line(health, rounds, countdown, styled=True):
+    active_health = health[health > 0]
+    totalcells = int(active_health.shape[0])
+    if totalcells == 0:
+        avghealth = 0
+        maxhealth = 0
+    else:
+        avghealth = round(float(active_health.mean()))
+        maxhealth = int(active_health.max())
+
+    if not styled:
+        return (
+            f'Petri Dish      AVG HP: {avghealth}   MAX HP: {maxhealth}    '
+            f'Total Players: {totalcells}   Oldest Cell: 0   '
+            f'Total Rounds: {rounds}    Countdown: {countdown}'
+        )
+
+    return (
+        f'{fg.red}Petri Dish{fg.rs}{fg.green}      AVG HP: {avghealth}   '
+        f'MAX HP: {maxhealth}{fg.rs}    {fg.white}Total Players: {totalcells}'
+        f'{fg.rs}   {fg.red}Oldest Cell: 0   Total Rounds: {rounds}'
+        f'{fg.rs}    {fg.blue}Countdown: {countdown}{fg.rs}'
+    )
+
+
 def write_snapshot(game, countdown, frame, snapshot_dir):
     snapshot_dir = Path(snapshot_dir)
     snapshot_dir.mkdir(parents=True, exist_ok=True)
@@ -558,6 +599,37 @@ def write_snapshot(game, countdown, frame, snapshot_dir):
         f'Frame: {frame}',
         status_line(game, countdown, styled=False),
         render_grid(game, styled=False),
+        '',
+    ]
+    path = snapshot_dir / f'frame_{frame:05d}.txt'
+    path.write_text('\n'.join(snapshot), encoding='utf-8')
+    return path
+
+
+def tensor_frame_text(index_grid, health, size, rounds, countdown, styled=True):
+    return (
+        f'{render_tensor_grid(index_grid, size, styled=styled)}\n'
+        f'{tensor_status_line(health, rounds, countdown, styled=styled)}'
+    )
+
+
+def draw_tensor_frame(index_grid, health, size, rounds, countdown, first_frame=False):
+    if first_frame:
+        cls()
+    elif os.getenv('TERM'):
+        sys.stdout.write('\033[H')
+    sys.stdout.write(tensor_frame_text(index_grid, health, size, rounds, countdown, styled=True))
+    sys.stdout.write('\033[J\n')
+    sys.stdout.flush()
+
+
+def write_tensor_snapshot(index_grid, health, size, rounds, countdown, frame, snapshot_dir):
+    snapshot_dir = Path(snapshot_dir)
+    snapshot_dir.mkdir(parents=True, exist_ok=True)
+    snapshot = [
+        f'Frame: {frame}',
+        tensor_status_line(health, rounds, countdown, styled=False),
+        render_tensor_grid(index_grid, size, styled=False),
         '',
     ]
     path = snapshot_dir / f'frame_{frame:05d}.txt'
@@ -954,7 +1026,153 @@ def prune(game):
     return game
 
 
+def main_tensor_rank1(args):
+    if args.load:
+        raise ValueError('--engine tensor_rank1 does not support --load yet')
+    if args.save_on_complete:
+        raise ValueError('--engine tensor_rank1 does not support --save-on-complete yet')
+    from tensor_rank1_sim import (
+        CudaGraphFamilyBasisBlockRunner,
+        TensorRank1State,
+        resolve_device,
+        resolve_health_dtype,
+        synchronize,
+    )
+
+    seed_all(args.seed)
+    size = terminal_size(args.size)
+    device_name = args.action_device
+    if device_name == 'auto':
+        device_name = 'cuda' if torch.cuda.is_available() else 'cpu'
+    device = resolve_device(device_name)
+    health_dtype = resolve_health_dtype(args.tensor_health_dtype)
+    if args.tensor_matmul_precision is not None:
+        torch.set_float32_matmul_precision(args.tensor_matmul_precision)
+    board_capacity = (size.lines - 2) * size.columns
+    initial_cells = min(args.initial_cells, board_capacity)
+
+    state = TensorRank1State.fixed_capacity(
+        active_cells=initial_cells,
+        height=size.lines,
+        width=size.columns,
+        active_families=1,
+        family_capacity=args.tensor_family_capacity,
+        device=device,
+        initial_health=args.tensor_initial_health,
+        cell_capacity=args.tensor_cell_capacity,
+        health_dtype=health_dtype,
+    )
+    active_family_count = 1
+    rounds = 0
+    countdown = ROUNDTIME
+    frame = 0
+    graph_runner = None
+    block_steps = max(int(args.tensor_block_steps), 1)
+    if device.type == 'cuda':
+        compile_state = state.clone()
+        compile_state.compiled_snapshot_combat_steps(
+            block_steps,
+            rebuild_grid=True,
+            family_basis=True,
+            compile_mode=args.tensor_compile_mode,
+        )
+        synchronize(device)
+    if device.type == 'cuda' and not args.no_tensor_cuda_graph:
+        graph_runner = CudaGraphFamilyBasisBlockRunner(state, block_steps, args.tensor_compile_mode)
+
+    last_active_cells = None
+
+    def active_cell_count():
+        nonlocal last_active_cells
+        if last_active_cells is None:
+            last_active_cells = int((state.health > 0).sum().item())
+        return last_active_cells
+
+    def invalidate_active_count():
+        nonlocal last_active_cells
+        last_active_cells = None
+
+    def apply_spawn_count(spawned):
+        nonlocal last_active_cells
+        if last_active_cells is not None:
+            last_active_cells += int(spawned)
+
+    def spawn_wave(count):
+        nonlocal active_family_count
+        spawned, active_family_count = state.append_static_weighted_wave(
+            active_family_count,
+            count,
+            initial_health=args.tensor_wave_initial_health,
+        )
+        apply_spawn_count(spawned)
+        return spawned
+
+    def run_steps(step_count):
+        if step_count <= 0:
+            return
+        if device.type == 'cuda':
+            if graph_runner is not None and step_count == block_steps:
+                graph_runner.replay()
+            else:
+                state.compiled_snapshot_combat_steps(
+                    step_count,
+                    rebuild_grid=True,
+                    family_basis=True,
+                    compile_mode=args.tensor_compile_mode,
+                )
+        else:
+            for _ in range(step_count):
+                state.step(movement='snapshot_combat', compact_dead=False, sync_positions=False)
+        invalidate_active_count()
+
+    def tensor_snapshot():
+        synchronize(device)
+        return (
+            state.index_grid.detach().cpu().numpy(),
+            state.health.detach().cpu().numpy(),
+        )
+
+    cursor_hidden = not args.no_render
+    if cursor_hidden:
+        hide_cursor()
+    try:
+        while args.max_frames is None or frame < args.max_frames:
+            if frame % args.tensor_static_refill_check_every == 0 and active_cell_count() == 0:
+                if spawn_wave(MIN_WAVE) == 0:
+                    break
+
+            if args.snapshot_dir and frame % args.snapshot_every == 0:
+                index_grid, health = tensor_snapshot()
+                write_tensor_snapshot(index_grid, health, size, rounds, countdown, frame, args.snapshot_dir)
+            if not args.no_render:
+                index_grid, health = tensor_snapshot()
+                draw_tensor_frame(index_grid, health, size, rounds, countdown, first_frame=(frame == 0))
+
+            if countdown == 0:
+                spawn_wave(max(PER_WAVE - active_cell_count(), MIN_WAVE))
+                countdown = ROUNDTIME
+                rounds += 1
+
+            if args.frame_rate > 0:
+                time.sleep(args.frame_rate)
+
+            remaining = block_steps
+            if args.max_frames is not None:
+                remaining = min(remaining, args.max_frames - frame)
+            step_count = min(remaining, countdown)
+            run_steps(step_count)
+            countdown -= step_count
+            frame += step_count
+    finally:
+        if cursor_hidden:
+            show_cursor()
+
+
 def main(args):
+    if args.engine == SIM_ENGINE_TENSOR_RANK1:
+        main_tensor_rank1(args)
+        return
+
     seed_all(args.seed)
     with torch.inference_mode():
         if args.load:
@@ -1036,6 +1254,7 @@ def load_state(name):
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser(description='Petri Dish')
+    parser.add_argument('--engine', choices=SIM_ENGINES, default=SIM_ENGINE_GAME)
     parser.add_argument('--load', help='load a saved state', default=False)
     parser.add_argument('--save', help='save the state', default='state.pkl')
     parser.add_argument('--save-on-complete', action='store_true', help='save when a bounded run finishes')
@@ -1061,6 +1280,16 @@ if __name__ == '__main__':
     parser.add_argument('--snapshot-every', type=positive_int, default=1, help='write one snapshot every N frames')
     parser.add_argument('--no-render', action='store_true', help='do not render frames to the terminal')
     parser.add_argument('--frame-rate', type=float, default=FRAME_RATE, help='seconds to sleep between frames')
+    parser.add_argument('--tensor-block-steps', type=positive_int, default=50)
+    parser.add_argument('--tensor-family-capacity', type=positive_int, default=7)
+    parser.add_argument('--tensor-cell-capacity', type=positive_int)
+    parser.add_argument('--tensor-initial-health', type=positive_int, default=15)
+    parser.add_argument('--tensor-wave-initial-health', type=positive_int, default=2)
+    parser.add_argument('--tensor-static-refill-check-every', type=positive_int, default=100)
+    parser.add_argument('--tensor-health-dtype', choices=('int64', 'int32'), default='int32')
+    parser.add_argument('--tensor-compile-mode', choices=('default', 'reduce-overhead', 'max-autotune'), default='default')
+    parser.add_argument('--tensor-matmul-precision', choices=('highest', 'high', 'medium'), default='high')
+    parser.add_argument('--no-tensor-cuda-graph', action='store_true')
     args = parser.parse_args()
 
     main(args)
