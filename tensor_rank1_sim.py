@@ -601,11 +601,12 @@ class TensorRank1State:
             cells=capacity,
             height=height,
             width=width,
-            families=family_capacity,
+            families=active_families,
             device=device,
             initial_health=initial_health,
             health_dtype=health_dtype,
         )
+        state.reserve_inactive_family_slots(family_capacity)
         if active_cells > 0:
             state.family_index[:active_cells] = torch.randint(
                 active_families,
@@ -635,6 +636,51 @@ class TensorRank1State:
             value = getattr(self, field_name)
             kwargs[field_name] = value.clone() if isinstance(value, torch.Tensor) else value
         return type(self)(**kwargs)
+
+    def reserve_inactive_family_slots(self, family_capacity):
+        family_capacity = int(family_capacity)
+        if family_capacity <= self.families:
+            return
+        extra = family_capacity - self.families
+        # Reserved rows are overwritten before they become live families, so
+        # keeping them inert avoids making dynamics depend on unused capacity.
+        self.base_weight_1 = torch.cat((
+            self.base_weight_1,
+            torch.zeros(
+                extra,
+                HIDDEN_DIM,
+                INPUT_DIM,
+                device=self.device,
+                dtype=self.base_weight_1.dtype,
+            ),
+        ), dim=0)
+        self.base_weight_2 = torch.cat((
+            self.base_weight_2,
+            torch.zeros(
+                extra,
+                OUTPUT_DIM,
+                HIDDEN_DIM,
+                device=self.device,
+                dtype=self.base_weight_2.dtype,
+            ),
+        ), dim=0)
+        self.u_1 = torch.cat((
+            self.u_1,
+            torch.zeros(extra, HIDDEN_DIM, device=self.device, dtype=self.u_1.dtype),
+        ), dim=0)
+        self.v_1 = torch.cat((
+            self.v_1,
+            torch.zeros(extra, INPUT_DIM, device=self.device, dtype=self.v_1.dtype),
+        ), dim=0)
+        self.u_2 = torch.cat((
+            self.u_2,
+            torch.zeros(extra, OUTPUT_DIM, device=self.device, dtype=self.u_2.dtype),
+        ), dim=0)
+        self.v_2 = torch.cat((
+            self.v_2,
+            torch.zeros(extra, HIDDEN_DIM, device=self.device, dtype=self.v_2.dtype),
+        ), dim=0)
+        self.refresh_base_weight_matmul_cache()
 
     def refresh_base_weight_matmul_cache(self):
         self.base_weight_1_matmul = flatten_base_weight_1_for_matmul(self.base_weight_1)

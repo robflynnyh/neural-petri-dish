@@ -1,10 +1,10 @@
 {
   "action_device": "cuda",
-  "active_cells_final": 326,
+  "active_cells_final": 327,
   "cell_capacity": 4640,
   "cuda_graph_captures": 1,
   "cuda_name": "NVIDIA RTX A4500",
-  "elapsed_seconds": 289.06412757653743,
+  "elapsed_seconds": 290.1405347241089,
   "empty_refills": 3,
   "family_capacity_final": 10,
   "frames_written": 5000,
@@ -23,5 +23,5 @@
     9000
   ],
   "rounds_completed": 10000,
-  "waves_spawned": 2558529
+  "waves_spawned": 2559053
 }

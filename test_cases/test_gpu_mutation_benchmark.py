@@ -649,6 +649,47 @@ def test_tensor_rank1_state_weighted_wave_uses_hp_weighted_survivors():
     assert_tensor_state_position_invariants(state)
 
 
+def test_tensor_rank1_fixed_capacity_inactive_family_slots_do_not_affect_rng_cpu():
+    kwargs = dict(
+        active_cells=4,
+        height=10,
+        width=10,
+        active_families=2,
+        device=torch.device('cpu'),
+        initial_health=3,
+        cell_capacity=10,
+    )
+    torch.manual_seed(123)
+    tight = TensorRank1State.fixed_capacity(family_capacity=2, **kwargs)
+    next_after_tight = torch.rand(4)
+
+    torch.manual_seed(123)
+    padded = TensorRank1State.fixed_capacity(family_capacity=5, **kwargs)
+    next_after_padded = torch.rand(4)
+
+    for field_name in (
+            'positions',
+            'flat_positions',
+            'health',
+            'recurrent_state',
+            'family_index',
+            'coeff_1',
+            'coeff_2',
+            'bias_1',
+            'bias_2'):
+        assert torch.equal(getattr(tight, field_name), getattr(padded, field_name))
+    assert torch.equal(tight.base_weight_1, padded.base_weight_1[:2])
+    assert torch.equal(tight.base_weight_2, padded.base_weight_2[:2])
+    assert torch.equal(tight.u_1, padded.u_1[:2])
+    assert torch.equal(tight.v_1, padded.v_1[:2])
+    assert torch.equal(tight.u_2, padded.u_2[:2])
+    assert torch.equal(tight.v_2, padded.v_2[:2])
+    assert padded.base_weight_1[2:].eq(0).all()
+    assert padded.base_weight_2[2:].eq(0).all()
+    assert torch.equal(next_after_tight, next_after_padded)
+    assert_tensor_state_base_matmul_cache(padded)
+
+
 def test_tensor_rank1_fixed_capacity_static_wave_keeps_shapes_cpu():
     torch.manual_seed(123)
     state = TensorRank1State.fixed_capacity(
