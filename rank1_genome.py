@@ -4,7 +4,7 @@ import torch
 
 # Rank-1 directions are normalized to unit RMS, so this is the approximate
 # per-wave perturbation RMS added to the shared base weights.
-FACTORED_WAVE_COEFF_SCALE = 0.3
+FACTORED_WAVE_COEFF_SCALE = 0.6
 NEIGHBOR_INPUT_DIM = 24
 HIDDEN_DIM = 32
 DIRECTION_OUTPUT_DIM = 9

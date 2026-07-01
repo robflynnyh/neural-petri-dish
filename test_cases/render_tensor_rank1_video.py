@@ -54,6 +54,7 @@ def parse_args():
     parser.add_argument('--tensor-initial-health', type=positive_int, default=15)
     parser.add_argument('--tensor-wave-initial-health', type=positive_int, default=2)
     parser.add_argument('--tensor-coeff-scale', type=float, default=npd.FACTORED_WAVE_COEFF_SCALE)
+    parser.add_argument('--fitness-update-lr', type=float, default=npd.FITNESS_UPDATE_LR)
     parser.add_argument('--tensor-stationary-health-cap', type=int, default=1)
     parser.add_argument('--tensor-static-refill-check-every', type=positive_int, default=100)
     parser.add_argument('--tensor-health-dtype', choices=tuple(HEALTH_DTYPES), default='float32')
@@ -127,6 +128,7 @@ def render_tensor_frame(index_grid, health, family_index, food_grid, size, round
 class TensorRank1VideoRun:
     def __init__(self, args):
         npd.seed_all(args.seed)
+        npd.FITNESS_UPDATE_LR = args.fitness_update_lr
         self.args = args
         size = npd.terminal_size(args.size)
         device_name = args.action_device
@@ -317,6 +319,7 @@ class TensorRank1VideoRun:
             'food_remaining_final': int(self.state.food_grid.sum().item()),
             'frames_written': frames_written,
             'full_simulation_frames': self.frame,
+            'fitness_update_lr': float(npd.FITNESS_UPDATE_LR),
             'output': str(output),
             'rounds_completed': self.rounds,
             'rendered_rounds': rendered_rounds,
@@ -378,7 +381,7 @@ def write_manifest(path, args, metrics):
         f'tensor_stationary_health_cap: {args.tensor_stationary_health_cap}',
         f'tensor_compile_mode: {args.tensor_compile_mode}',
         f'tensor_matmul_precision: {args.tensor_matmul_precision}',
-        f'fitness_update_lr: {npd.FITNESS_UPDATE_LR}',
+        f'fitness_update_lr: {metrics["fitness_update_lr"]}',
         f'food_per_round: {metrics["food_per_round"]}',
         f'food_health_reward: {metrics["food_health_reward"]}',
         f'food_remaining_final: {metrics["food_remaining_final"]}',

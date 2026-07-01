@@ -1048,7 +1048,7 @@ MOVEMENT_HEALTH_COST = 0.1
 STATIONARY_HEALTH_COST = 1
 STATIONARY_DAMAGE_AFTER_STEPS = 3
 KILL_HEALTH_REWARD = 5
-FITNESS_UPDATE_LR = 0.05
+FITNESS_UPDATE_LR = 0.15
 PER_WAVE = 600
 MIN_WAVE = 500
 MAX_TOTAL = 1000
@@ -1062,6 +1062,9 @@ def prune(game):
 
 
 def main_tensor_rank1(args):
+    global FITNESS_UPDATE_LR
+    FITNESS_UPDATE_LR = args.fitness_update_lr
+
     if args.load:
         raise ValueError('--engine tensor_rank1 does not support --load yet')
     if args.save_on_complete:
@@ -1258,6 +1261,7 @@ def main_tensor_rank1(args):
             'rounds': rounds,
             'snapshots': snapshots,
             'tensor_coeff_scale': args.tensor_coeff_scale,
+            'fitness_update_lr': FITNESS_UPDATE_LR,
             'tensor_stationary_health_cap': args.tensor_stationary_health_cap,
             'tensor_block_steps': block_steps,
             'waves_spawned': waves_spawned,
@@ -1387,6 +1391,7 @@ if __name__ == '__main__':
     parser.add_argument('--tensor-initial-health', type=positive_int, default=15)
     parser.add_argument('--tensor-wave-initial-health', type=positive_int, default=2)
     parser.add_argument('--tensor-coeff-scale', type=float, default=FACTORED_WAVE_COEFF_SCALE)
+    parser.add_argument('--fitness-update-lr', type=float, default=FITNESS_UPDATE_LR)
     parser.add_argument('--tensor-stationary-health-cap', type=int, default=1)
     parser.add_argument('--tensor-static-refill-check-every', type=positive_int, default=100)
     parser.add_argument('--tensor-health-dtype', choices=('float32', 'int64', 'int32'), default='float32')

@@ -488,6 +488,7 @@ def test_batched_shared_rank1_actions_match_materialized_networks():
     )
     npd.init(game, num=3)
     cells = game.cells
+    prev_states = [cell.prev_state.copy() for cell in cells]
     expected = []
 
     for cell in cells:
@@ -495,6 +496,8 @@ def test_batched_shared_rank1_actions_match_materialized_networks():
         neighbors = game.grid[y-2:y+3, x-2:x+3].reshape(25)
         expected.append(cell.forward_flat_neighbors25(neighbors))
 
+    for cell, prev_state in zip(cells, prev_states):
+        cell.prev_state[:] = prev_state
     planned = npd.planned_family_action_list(game, cells)
     assert [action for action, _hidden in planned] == expected
 
