@@ -1,4 +1,5 @@
 import json
+import os
 import subprocess
 import sys
 from pathlib import Path
@@ -6,9 +7,12 @@ from pathlib import Path
 import pytest
 import torch
 
+sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))
+
 import neural_petri_dish as npd
 from tensor_rank1_sim import (
     DIRECTION_OUTPUT_DIM,
+    EVENT_COUNT_NAMES,
     HIDDEN_DIM,
     NEIGHBOR_INPUT_DIM,
     TensorRank1State,
@@ -57,6 +61,78 @@ def assert_tensor_state_base_matmul_cache(state):
     ).t().contiguous()
     assert torch.equal(state.base_weight_1_matmul, expected_weight_1)
     assert torch.equal(state.base_weight_2_matmul, expected_weight_2)
+
+
+def force_single_cell_action(state, direction, attack=False):
+    state.base_weight_1.zero_()
+    state.base_weight_2.zero_()
+    state.u_1.zero_()
+    state.v_1.zero_()
+    state.u_2.zero_()
+    state.v_2.zero_()
+    state.coeff_1.zero_()
+    state.coeff_2.zero_()
+    state.bias_1.fill_(1)
+    state.bias_2.fill_(-10)
+    state.bias_2[:, direction] = 10
+    state.bias_2[:, npd.ATTACK_OUTPUT_INDEX] = 10 if attack else -10
+    state.refresh_base_weight_matmul_cache()
+
+
+def place_single_cell_and_npc(state, cell_row, cell_col, npc_row, npc_col):
+    state.health.zero_()
+    state.health[0] = 3
+    state.stationary_steps.zero_()
+    state.recurrent_state.zero_()
+    state.food_grid.zero_()
+    state.flat_positions[0] = cell_row * state.grid_stride + cell_col
+    state.positions[0, 0] = cell_row
+    state.positions[0, 1] = cell_col
+    state.family_index[0] = 0
+    state.round_survival_steps.zero_()
+    state.round_participants.copy_(state.health > 0)
+    state.npc_flat_positions = torch.tensor(
+        [npc_row * state.grid_stride + npc_col],
+        device=state.device,
+        dtype=torch.long,
+    )
+    state.npc_grid.zero_()
+    state.npc_grid.reshape(-1)[state.npc_flat_positions] = 1
+    state.npc_random_directions = torch.empty(1, 1, device=state.device, dtype=torch.long)
+    state.rebuild_grids()
+
+
+def run_single_family_basis_step(state, npc_direction):
+    state.npc_random_directions[0, 0] = npc_direction
+    outputs = snapshot_combat_step_tensors_family_basis_rebuild_grid(
+        state.index_grid,
+        state.food_grid,
+        state.flat_positions,
+        state.health,
+        state.stationary_steps,
+        state.recurrent_state,
+        state.round_survival_steps,
+        state.npc_flat_positions,
+        state.npc_random_directions[0],
+        state.family_index,
+        state.coeff_1,
+        state.coeff_2,
+        state.bias_1,
+        state.bias_2,
+        state.base_weight_1_matmul,
+        state.base_weight_2_matmul,
+        state.u_1,
+        state.v_1,
+        state.u_2,
+        state.v_2,
+        state.stationary_health_cap,
+        state.index_grid_indices(),
+        state.dead_index_grid_indices(),
+        state.neighbor_flat_offsets,
+        state.direction_flat_deltas,
+    )
+    event_counts = dict(zip(EVENT_COUNT_NAMES, outputs[-1].to(torch.long).tolist()))
+    return outputs, event_counts
 
 
 def test_gpu_mutation_benchmark_cpu_smoke():
@@ -1155,6 +1231,59 @@ def test_tensor_rank1_static_wave_grows_when_all_family_slots_are_live_cpu():
     assert state.family_index[state.health == 7].eq(2).all()
     assert_tensor_state_base_matmul_cache(state)
     assert_tensor_state_position_invariants(state)
+
+
+def test_tensor_rank1_cell_dies_when_moving_into_npc_old_tile_cpu():
+    state = TensorRank1State.fixed_capacity(
+        active_cells=1,
+        height=8,
+        width=8,
+        active_families=1,
+        family_capacity=1,
+        device=torch.device('cpu'),
+        initial_health=3,
+        cell_capacity=1,
+        npc_count=0,
+    )
+    place_single_cell_and_npc(state, cell_row=4, cell_col=4, npc_row=4, npc_col=5)
+    force_single_cell_action(state, direction=3, attack=False)
+
+    outputs, event_counts = run_single_family_basis_step(state, npc_direction=3)
+    new_flat_positions, new_health, *_rest = outputs
+
+    assert int(new_flat_positions[0].item()) == 4 * state.grid_stride + 5
+    assert float(new_health[0].item()) == 0.0
+    assert event_counts['npc_kills'] == 1
+    assert event_counts['npc_visible_cell_steps'] == 1
+    assert event_counts['npc_visible_deaths'] == 1
+    assert event_counts['npc_visible_npc_kills'] == 1
+
+
+def test_tensor_rank1_cell_dies_when_npc_moves_into_cell_cpu():
+    state = TensorRank1State.fixed_capacity(
+        active_cells=1,
+        height=8,
+        width=8,
+        active_families=1,
+        family_capacity=1,
+        device=torch.device('cpu'),
+        initial_health=3,
+        cell_capacity=1,
+        npc_count=0,
+    )
+    place_single_cell_and_npc(state, cell_row=4, cell_col=4, npc_row=4, npc_col=5)
+    force_single_cell_action(state, direction=0, attack=False)
+
+    outputs, event_counts = run_single_family_basis_step(state, npc_direction=4)
+    _new_flat_positions, new_health, _stationary_steps, _hidden, _actions, _survival, new_npc_positions, _counts = outputs
+
+    assert int(new_npc_positions[0].item()) == 4 * state.grid_stride + 4
+    assert float(new_health[0].item()) == 0.0
+    assert event_counts['npc_kills'] == 1
+    assert event_counts['stayed_put'] == 1
+    assert event_counts['npc_visible_cell_steps'] == 1
+    assert event_counts['npc_visible_deaths'] == 1
+    assert event_counts['npc_visible_npc_kills'] == 1
 
 
 def test_tensor_rank1_round_transition_health_cost_is_disabled_cpu():

@@ -781,6 +781,51 @@ def test_tensor_rank1_video_renderer_writes_artifact_and_manifest(tmp_path):
     assert 'early_ended_rounds: 1' in manifest_text
 
 
+def test_tensor_rank1_renderer_metrics_only_skips_video_writer(tmp_path):
+    script = Path(__file__).resolve().parent / 'render_tensor_rank1_video.py'
+    output = tmp_path / 'tensor_metrics_only.mp4'
+    result = subprocess.run(
+        [
+            sys.executable,
+            str(script),
+            '--output',
+            str(output),
+            '--rounds',
+            '2',
+            '--render-rounds',
+            '0',
+            '--metrics-only',
+            '--size',
+            '5x5',
+            '--initial-cells',
+            '4',
+            '--seed',
+            '7',
+            '--action-device',
+            'cpu',
+        ],
+        capture_output=True,
+        text=True,
+        timeout=30,
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert not output.exists()
+    manifest = output.with_suffix(output.suffix + '.manifest.txt')
+    metrics_json = output.with_suffix(output.suffix + '.metrics.json')
+    round_metrics = output.with_suffix(output.suffix + '.round_metrics.csv')
+    assert manifest.exists()
+    assert metrics_json.exists()
+    assert round_metrics.exists()
+    metrics = json.loads(metrics_json.read_text(encoding='utf-8'))
+    assert metrics['metrics_only'] is True
+    assert metrics['npc_dodge_metric_summary']['window_rounds'] == 2
+    manifest_text = manifest.read_text(encoding='utf-8')
+    assert 'metrics_only: True' in manifest_text
+    assert 'render_rounds: 0' in manifest_text
+    assert 'frames_written: 0' in manifest_text
+
+
 def test_normal_play_benchmark_exposes_tensor_engine_and_rejects_cpu():
     script = Path(__file__).resolve().parents[1] / 'scripts' / 'benchmark_normal_play.py'
     help_result = subprocess.run(

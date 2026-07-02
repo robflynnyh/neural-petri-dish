@@ -22,7 +22,30 @@ NPC_INPUT_VALUE = npd.NPC_INPUT_VALUE
 BASE_ATTACK_DAMAGE = 1
 LONE_TARGET_DAMAGE_BONUS = 1
 NPC_DIRECTION_INDICES = (1, 2, 3, 4)
-EVENT_COUNT_DIM = 21
+EVENT_COUNT_NAMES = (
+    'active_cell_steps',
+    'move_attempts',
+    'move_successes',
+    'attack_attempts',
+    'attack_hits',
+    'attack_kills',
+    'lone_target_hits',
+    'border_hits',
+    'food_eaten',
+    'deaths',
+    'stayed_put',
+    'alive_end_sum',
+    'npc_kills',
+    'npc_visible_cell_steps',
+    'npc_adjacent_cell_steps',
+    'npc_visible_move_away',
+    'npc_visible_move_toward',
+    'npc_visible_move_same',
+    'npc_visible_successful_escape',
+    'npc_visible_deaths',
+    'npc_visible_npc_kills',
+)
+EVENT_COUNT_DIM = len(EVENT_COUNT_NAMES)
 _COMPILED_SNAPSHOT_COMBAT_STEP = {}
 _COMPILED_REBUILD_SNAPSHOT_COMBAT_STEP = {}
 _COMPILED_FAMILY_BASIS_REBUILD_SNAPSHOT_COMBAT_STEP = {}

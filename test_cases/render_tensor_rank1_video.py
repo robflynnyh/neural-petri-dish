@@ -16,6 +16,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 import neural_petri_dish as npd
 from tensor_rank1_sim import (
     COMPILE_MODES,
+    EVENT_COUNT_NAMES,
     HEALTH_DTYPES,
     MATMUL_PRECISIONS,
     NETWORK_DTYPES,
@@ -30,29 +31,7 @@ from tensor_rank1_sim import (
 
 
 DEFAULT_OUTPUT = 'test_cases/artifacts/tensor_rank1_10k_rounds_every_1000.mp4'
-EVENT_COUNT_NAMES = (
-    'active_cell_steps',
-    'move_attempts',
-    'move_successes',
-    'attack_attempts',
-    'attack_hits',
-    'attack_kills',
-    'lone_target_hits',
-    'border_hits',
-    'food_eaten',
-    'deaths',
-    'stayed_put',
-    'alive_end_sum',
-    'npc_kills',
-    'npc_visible_cell_steps',
-    'npc_adjacent_cell_steps',
-    'npc_visible_move_away',
-    'npc_visible_move_toward',
-    'npc_visible_move_same',
-    'npc_visible_successful_escape',
-    'npc_visible_deaths',
-    'npc_visible_npc_kills',
-)
+DODGE_SUMMARY_WINDOW_ROUNDS = 100
 
 
 def positive_int(value):
@@ -62,11 +41,18 @@ def positive_int(value):
     return parsed
 
 
+def non_negative_int(value):
+    parsed = int(value)
+    if parsed < 0:
+        raise argparse.ArgumentTypeError('value must be non-negative')
+    return parsed
+
+
 def parse_args():
     parser = argparse.ArgumentParser(description='Render sampled rounds from the tensor rank-1 engine.')
     parser.add_argument('--output', default=DEFAULT_OUTPUT)
     parser.add_argument('--rounds', type=positive_int, default=10000)
-    parser.add_argument('--render-rounds', type=positive_int, default=10)
+    parser.add_argument('--render-rounds', type=non_negative_int, default=10)
     parser.add_argument('--round-stride', '--save-every-rounds', dest='round_stride', type=positive_int, default=1000)
     parser.add_argument('--fps', type=positive_int, default=24)
     parser.add_argument('--size', type=npd.parse_size, default=(60, 80), help='grid size as LINESxCOLUMNS')
@@ -100,9 +86,12 @@ def parse_args():
     parser.add_argument('--tensor-matmul-precision', choices=MATMUL_PRECISIONS, default='high')
     parser.add_argument('--tensor-cuda-graph', dest='no_tensor_cuda_graph', action='store_false')
     parser.add_argument('--no-tensor-cuda-graph', dest='no_tensor_cuda_graph', action='store_true')
+    parser.add_argument('--metrics-only', action='store_true', help='run the tensor simulation and write metrics without opening a video writer')
     parser.add_argument('--save-final-state', help='write final tensor state/debug payload with torch.save')
     parser.set_defaults(no_tensor_cuda_graph=False)
     args = parser.parse_args()
+    if args.render_rounds == 0 and not args.metrics_only:
+        parser.error('--render-rounds 0 requires --metrics-only')
     if args.tensor_static_refill_check_every % args.tensor_block_steps != 0:
         parser.error('--tensor-block-steps must divide --tensor-static-refill-check-every')
     return args
@@ -110,6 +99,43 @@ def parse_args():
 
 def selected_rounds(render_rounds, round_stride):
     return [round_index * round_stride for round_index in range(render_rounds)]
+
+
+def dodge_window_summary(round_summaries, start, end):
+    rows = round_summaries[start:end]
+    if not rows:
+        return {}
+    active_steps = max(1, sum(row['active_cell_steps'] for row in rows))
+    visible_steps = max(1, sum(row['npc_visible_cell_steps'] for row in rows))
+    participant_cells = max(1, sum(row['participant_cells'] for row in rows))
+    return {
+        'round_start': int(rows[0]['round']),
+        'round_end': int(rows[-1]['round']),
+        'rounds': int(len(rows)),
+        'survival_mean': float(sum(row['survival_mean'] * row['participant_cells'] for row in rows) / participant_cells),
+        'frames_elapsed_mean': float(sum(row['frames_elapsed'] for row in rows) / len(rows)),
+        'food_eaten_per_round': float(sum(row['food_eaten'] for row in rows) / len(rows)),
+        'npc_visible_cell_steps': int(sum(row['npc_visible_cell_steps'] for row in rows)),
+        'npc_visible_move_away_rate': float(sum(row['npc_visible_move_away'] for row in rows) / visible_steps),
+        'npc_visible_move_toward_rate': float(sum(row['npc_visible_move_toward'] for row in rows) / visible_steps),
+        'npc_visible_death_rate': float(sum(row['npc_visible_deaths'] for row in rows) / visible_steps),
+        'npc_adjacent_fraction': float(sum(row['npc_adjacent_cell_steps'] for row in rows) / active_steps),
+        'npc_kill_rate': float(sum(row['npc_kills'] for row in rows) / active_steps),
+        'death_rate': float(sum(row['deaths'] for row in rows) / active_steps),
+        'move_success_rate': float(sum(row['move_successes'] for row in rows) / active_steps),
+        'stayed_put_rate': float(sum(row['stayed_put'] for row in rows) / active_steps),
+    }
+
+
+def dodge_metric_summary(round_summaries):
+    if not round_summaries:
+        return {}
+    window = min(DODGE_SUMMARY_WINDOW_ROUNDS, len(round_summaries))
+    return {
+        'window_rounds': int(window),
+        'first_window': dodge_window_summary(round_summaries, 0, window),
+        'last_window': dodge_window_summary(round_summaries, len(round_summaries) - window, len(round_summaries)),
+    }
 
 
 def tensor_status_text(health, family_index, food_grid, npc_grid, rounds, countdown, global_frame):
@@ -465,6 +491,7 @@ class TensorRank1VideoRun:
             'movement_health_cost': float(npd.MOVEMENT_HEALTH_COST),
             'npc_count': int(self.state.npc_flat_positions.numel()),
             'npc_input_value': float(npd.NPC_INPUT_VALUE),
+            'npc_dodge_metric_summary': dodge_metric_summary(self.round_summaries),
             'per_wave': int(npd.PER_WAVE),
             'round_transition_health_cost': float(npd.ROUND_TRANSITION_HEALTH_COST),
             'roundtime': int(npd.ROUNDTIME),
@@ -528,6 +555,7 @@ def write_manifest(path, args, metrics):
         f'rounds_completed: {metrics["rounds_completed"]}',
         f'render_rounds: {args.render_rounds}',
         f'round_stride: {args.round_stride}',
+        f'metrics_only: {metrics["metrics_only"]}',
         f'rendered_rounds: {",".join(str(round_num) for round_num in metrics["rendered_rounds"])}',
         f'frames_written: {metrics["frames_written"]}',
         f'full_simulation_frames: {metrics["full_simulation_frames"]}',
@@ -582,27 +610,34 @@ def main():
     args = parse_args()
     output = Path(args.output)
     output.parent.mkdir(parents=True, exist_ok=True)
-    rounds_to_render = selected_rounds(args.render_rounds, args.round_stride)
+    rounds_to_render = [] if args.metrics_only else selected_rounds(args.render_rounds, args.round_stride)
     rounds_to_render_set = set(rounds_to_render)
     rendered_rounds = []
     frames_written = 0
     font = ImageFont.load_default()
 
     started = time.perf_counter()
-    with torch.inference_mode(), imageio.get_writer(output, fps=args.fps, macro_block_size=1) as writer:
+    with torch.inference_mode():
         run = TensorRank1VideoRun(args)
-        while run.rounds < args.rounds:
-            if run.rounds in rounds_to_render_set:
-                rendered_rounds.append(run.rounds)
-                written, ok = run.render_round(writer, font)
-                frames_written += written
-            else:
-                ok = run.advance_unrendered_round()
-            if not ok:
-                break
+        if args.metrics_only:
+            while run.rounds < args.rounds:
+                if not run.advance_unrendered_round():
+                    break
+        else:
+            with imageio.get_writer(output, fps=args.fps, macro_block_size=1) as writer:
+                while run.rounds < args.rounds:
+                    if run.rounds in rounds_to_render_set:
+                        rendered_rounds.append(run.rounds)
+                        written, ok = run.render_round(writer, font)
+                        frames_written += written
+                    else:
+                        ok = run.advance_unrendered_round()
+                    if not ok:
+                        break
 
         elapsed = time.perf_counter() - started
         metrics = run.metrics(elapsed, frames_written, rendered_rounds, output)
+        metrics['metrics_only'] = bool(args.metrics_only)
         run.write_round_metrics(Path(metrics['round_metrics_csv']))
         if args.save_final_state:
             state_path = run.save_state(args.save_final_state, metrics)
