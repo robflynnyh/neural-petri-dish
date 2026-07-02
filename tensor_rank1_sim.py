@@ -22,6 +22,17 @@ NPC_INPUT_VALUE = npd.NPC_INPUT_VALUE
 BASE_ATTACK_DAMAGE = 1
 LONE_TARGET_DAMAGE_BONUS = 1
 NPC_DIRECTION_INDICES = (1, 2, 3, 4)
+DIRECTION_NAMES = (
+    'stationary',
+    'up',
+    'down',
+    'right',
+    'left',
+    'up_right',
+    'up_left',
+    'down_right',
+    'down_left',
+)
 EVENT_COUNT_NAMES = (
     'active_cell_steps',
     'move_attempts',
@@ -56,6 +67,24 @@ EVENT_COUNT_NAMES = (
     'npc_adjacent_move_away',
     'npc_adjacent_move_toward',
     'npc_adjacent_stayed_put',
+    'direction_stationary',
+    'direction_up',
+    'direction_down',
+    'direction_right',
+    'direction_left',
+    'direction_up_right',
+    'direction_up_left',
+    'direction_down_right',
+    'direction_down_left',
+    'npc_adjacent_direction_stationary',
+    'npc_adjacent_direction_up',
+    'npc_adjacent_direction_down',
+    'npc_adjacent_direction_right',
+    'npc_adjacent_direction_left',
+    'npc_adjacent_direction_up_right',
+    'npc_adjacent_direction_up_left',
+    'npc_adjacent_direction_down_right',
+    'npc_adjacent_direction_down_left',
 )
 EVENT_COUNT_DIM = len(EVENT_COUNT_NAMES)
 _COMPILED_SNAPSHOT_COMBAT_STEP = {}
@@ -723,6 +752,14 @@ def snapshot_combat_step_tensors_family_basis_rebuild_grid(
         npc_adjacent_move_away = npc_adjacent_move & (dist_after_old_npcs > dist_before)
         npc_adjacent_move_toward = npc_adjacent_move & (dist_after_old_npcs < dist_before)
         npc_adjacent_stayed_put = npc_adjacent & stayed_put
+        direction_counts = torch.stack(tuple(
+            (active & (directions == direction_index)).sum()
+            for direction_index in range(DIRECTION_OUTPUT_DIM)
+        ))
+        npc_adjacent_direction_counts = torch.stack(tuple(
+            (npc_adjacent & (directions == direction_index)).sum()
+            for direction_index in range(DIRECTION_OUTPUT_DIM)
+        ))
         event_counts = torch.stack((
             active.sum(),
             move_intents.sum(),
@@ -757,6 +794,8 @@ def snapshot_combat_step_tensors_family_basis_rebuild_grid(
             npc_adjacent_move_away.sum(),
             npc_adjacent_move_toward.sum(),
             npc_adjacent_stayed_put.sum(),
+            *direction_counts,
+            *npc_adjacent_direction_counts,
         )).to(torch.float32)
     else:
         event_counts = torch.zeros(EVENT_COUNT_DIM, device=index_grid.device, dtype=torch.float32)
@@ -2329,7 +2368,7 @@ def benchmark_tensor_state(
         active_steps = max(1, values['active_cell_steps'])
         visible_steps = max(1, values['npc_visible_cell_steps'])
         adjacent_steps = max(1, values['npc_adjacent_cell_steps'])
-        values.update({
+        rates = {
             'move_success_rate': values['move_successes'] / active_steps,
             'death_rate': values['deaths'] / active_steps,
             'npc_kill_rate': values['npc_kills'] / active_steps,
@@ -2351,7 +2390,13 @@ def benchmark_tensor_state(
             'npc_adjacent_move_toward_rate': values['npc_adjacent_move_toward'] / adjacent_steps,
             'npc_adjacent_stayed_put_rate': values['npc_adjacent_stayed_put'] / adjacent_steps,
             'stayed_put_rate': values['stayed_put'] / active_steps,
-        })
+        }
+        for direction_name in DIRECTION_NAMES:
+            rates[f'direction_{direction_name}_rate'] = values[f'direction_{direction_name}'] / active_steps
+            rates[f'npc_adjacent_direction_{direction_name}_rate'] = (
+                values[f'npc_adjacent_direction_{direction_name}'] / adjacent_steps
+            )
+        values.update(rates)
         return values
 
     def append_trace_segment(start_step, end_step, segment_seconds, end_active_cells):

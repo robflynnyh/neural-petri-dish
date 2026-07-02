@@ -12,6 +12,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 import neural_petri_dish as npd
 from tensor_rank1_sim import (
     COMPILE_MODES,
+    DIRECTION_NAMES,
     EVENT_COUNT_NAMES,
     HEALTH_DTYPES,
     MATMUL_PRECISIONS,
@@ -77,7 +78,7 @@ def event_window_summary(trace_segments, start, end):
     active_steps = max(1, counts['active_cell_steps'])
     visible_steps = max(1, counts['npc_visible_cell_steps'])
     adjacent_steps = max(1, counts['npc_adjacent_cell_steps'])
-    counts.update({
+    rates = {
         'round_start': int(start + 1),
         'round_end': int(end),
         'rounds': int(len(rows)),
@@ -103,7 +104,13 @@ def event_window_summary(trace_segments, start, end):
         'npc_adjacent_move_toward_rate': counts['npc_adjacent_move_toward'] / adjacent_steps,
         'npc_adjacent_stayed_put_rate': counts['npc_adjacent_stayed_put'] / adjacent_steps,
         'stayed_put_rate': counts['stayed_put'] / active_steps,
-    })
+    }
+    for direction_name in DIRECTION_NAMES:
+        rates[f'direction_{direction_name}_rate'] = counts[f'direction_{direction_name}'] / active_steps
+        rates[f'npc_adjacent_direction_{direction_name}_rate'] = (
+            counts[f'npc_adjacent_direction_{direction_name}'] / adjacent_steps
+        )
+    counts.update(rates)
     return counts
 
 
