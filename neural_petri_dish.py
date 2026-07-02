@@ -135,7 +135,7 @@ LONE_TARGET_DAMAGE_BONUS = 1
 FOOD_PER_ROUND = 25
 FOOD_HEALTH_REWARD = 2.5
 FOOD_INPUT_VALUE = 2
-NPC_COUNT = 10
+NPC_COUNT = 30
 NPC_INPUT_VALUE = 3
 NEIGHBOR_OFFSETS = np.array(
     [(dy, dx) for dy in range(-2, 3) for dx in range(-2, 3) if not (dy == 0 and dx == 0)],

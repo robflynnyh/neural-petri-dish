@@ -2052,7 +2052,8 @@ def benchmark_tensor_state(
         normal_round_refill=False,
         early_end_empty_round=False,
         per_wave=None,
-        min_wave=None):
+        min_wave=None,
+        npc_count=npd.NPC_COUNT):
     compiled_step = bool(compiled_step)
     static_capacity = bool(static_capacity)
     static_refill_empty = bool(static_refill_empty)
@@ -2143,6 +2144,7 @@ def benchmark_tensor_state(
             network_dtype=network_dtype,
             coeff_scale=coeff_scale,
             stationary_health_cap=stationary_health_cap,
+            npc_count=npc_count,
         )
         active_family_count = families
     else:
@@ -2157,6 +2159,7 @@ def benchmark_tensor_state(
             network_dtype=network_dtype,
             coeff_scale=coeff_scale,
             stationary_health_cap=stationary_health_cap,
+            npc_count=npc_count,
         )
         active_family_count = state.families
     sync_positions_each_step = False
@@ -2488,6 +2491,7 @@ def benchmark_tensor_state(
         'network_dtype': str(network_dtype).removeprefix('torch.'),
         'network_dtype_requested': network_dtype_name,
         'min_wave': min_wave if normal_round_refill else None,
+        'npc_count': int(state.npc_flat_positions.numel()),
         'normal_round_refill': normal_round_refill,
         'matmul_precision': matmul_precision,
         'per_wave': per_wave if normal_round_refill else None,

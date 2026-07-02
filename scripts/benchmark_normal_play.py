@@ -43,6 +43,7 @@ def parse_args():
     parser.add_argument('--tensor-stationary-health-cap', type=int, default=1)
     parser.add_argument('--tensor-family-capacity', type=positive_int, default=10)
     parser.add_argument('--tensor-cell-capacity', type=positive_int)
+    parser.add_argument('--npc-count', type=int, default=npd.NPC_COUNT)
     parser.add_argument('--tensor-static-refill-check-every', type=positive_int, default=100)
     parser.add_argument('--tensor-health-dtype', choices=tuple(HEALTH_DTYPES), default='float32')
     parser.add_argument('--tensor-network-dtype', choices=('auto', *tuple(NETWORK_DTYPES)), default='auto')
@@ -101,6 +102,7 @@ def run_tensor_rank1(args):
         early_end_empty_round=True,
         per_wave=npd.PER_WAVE,
         min_wave=npd.MIN_WAVE,
+        npc_count=args.npc_count,
     )
     completed = []
     for index, segment in enumerate(metrics.get('trace_segments', []), start=1):
@@ -122,6 +124,7 @@ def run_tensor_rank1(args):
         'batched_min_family_size': args.batched_min_family_size,
         'cuda_name': metrics['cuda_name'],
         'initial_cells': args.initial_cells,
+        'npc_count': metrics['npc_count'],
         'roundtime': npd.ROUNDTIME,
         'seed': args.seed,
         'size': f'{size.lines}x{size.columns}',
