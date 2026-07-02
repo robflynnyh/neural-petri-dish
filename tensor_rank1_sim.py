@@ -683,6 +683,7 @@ class CudaGraphFamilyBasisBlockRunner:
             compile_mode,
         )
         self.graph = torch.cuda.CUDAGraph()
+        self.event_counts = torch.empty(12, device=state.device, dtype=torch.float32)
         original_index_grid = state.index_grid.clone()
         original_food_grid = state.food_grid.clone()
         original_flat_positions = state.flat_positions.clone()
@@ -692,7 +693,7 @@ class CudaGraphFamilyBasisBlockRunner:
         original_round_survival_steps = state.round_survival_steps.clone()
 
         with torch.cuda.graph(self.graph):
-            flat_positions, health, stationary_steps, recurrent_state, round_survival_steps, _event_counts = self.step_fn(
+            flat_positions, health, stationary_steps, recurrent_state, round_survival_steps, event_counts = self.step_fn(
                 *state.family_basis_block_args()
             )
             state.flat_positions.copy_(flat_positions)
@@ -700,6 +701,7 @@ class CudaGraphFamilyBasisBlockRunner:
             state.stationary_steps.copy_(stationary_steps)
             state.recurrent_state.copy_(recurrent_state)
             state.round_survival_steps.copy_(round_survival_steps)
+            self.event_counts.copy_(event_counts)
         state.index_grid.copy_(original_index_grid)
         state.food_grid.copy_(original_food_grid)
         state.flat_positions.copy_(original_flat_positions)
@@ -711,6 +713,7 @@ class CudaGraphFamilyBasisBlockRunner:
 
     def replay(self):
         self.graph.replay()
+        return self.event_counts
 
 
 

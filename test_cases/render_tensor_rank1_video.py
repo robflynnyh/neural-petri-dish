@@ -88,7 +88,7 @@ def parse_args():
     parser.add_argument('--tensor-cuda-graph', dest='no_tensor_cuda_graph', action='store_false')
     parser.add_argument('--no-tensor-cuda-graph', dest='no_tensor_cuda_graph', action='store_true')
     parser.add_argument('--save-final-state', help='write final tensor state/debug payload with torch.save')
-    parser.set_defaults(no_tensor_cuda_graph=True)
+    parser.set_defaults(no_tensor_cuda_graph=False)
     args = parser.parse_args()
     if args.tensor_static_refill_check_every % args.tensor_block_steps != 0:
         parser.error('--tensor-block-steps must divide --tensor-static-refill-check-every')
@@ -181,8 +181,6 @@ class TensorRank1VideoRun:
         self.active_family_count = 1
         self.last_active_cells = None
         self.graph_runners = {}
-        self.behavior_totals = {name: 0 for name in EVENT_COUNT_NAMES}
-        self.round_event_counts = {name: 0 for name in EVENT_COUNT_NAMES}
         self.round_summaries = []
 
         if args.tensor_matmul_precision is not None:
@@ -206,6 +204,8 @@ class TensorRank1VideoRun:
             coeff_scale=args.tensor_coeff_scale,
             stationary_health_cap=args.tensor_stationary_health_cap,
         )
+        self.behavior_totals_tensor = torch.zeros(len(EVENT_COUNT_NAMES), device=self.device, dtype=torch.float64)
+        self.round_event_counts_tensor = torch.zeros(len(EVENT_COUNT_NAMES), device=self.device, dtype=torch.float64)
         self.warm_compiled_shape(args.tensor_block_steps)
 
     def warm_compiled_shape(self, step_count):
@@ -235,11 +235,9 @@ class TensorRank1VideoRun:
     def record_event_counts(self, event_counts):
         if event_counts is None:
             return
-        counts = event_counts.detach().cpu().to(torch.long).tolist()
-        for name, value in zip(EVENT_COUNT_NAMES, counts):
-            value = int(value)
-            self.behavior_totals[name] += value
-            self.round_event_counts[name] += value
+        counts = event_counts.to(device=self.device, dtype=self.behavior_totals_tensor.dtype)
+        self.behavior_totals_tensor.add_(counts)
+        self.round_event_counts_tensor.add_(counts)
 
     def record_round_summary(self):
         active_end = self.active_cell_count()
@@ -273,7 +271,8 @@ class TensorRank1VideoRun:
             'survival_full_count': survival_full_count,
             'food_remaining': int(self.state.food_grid.sum().item()),
         }
-        summary.update({name: int(self.round_event_counts[name]) for name in EVENT_COUNT_NAMES})
+        event_counts = self.round_event_counts_tensor.detach().cpu().to(torch.long).tolist()
+        summary.update({name: int(value) for name, value in zip(EVENT_COUNT_NAMES, event_counts)})
         active_steps = max(1, summary['active_cell_steps'])
         participants_count = max(1, summary['participant_cells'])
         summary.update({
@@ -289,7 +288,7 @@ class TensorRank1VideoRun:
             'stayed_put_rate': float(summary['stayed_put'] / active_steps),
         })
         self.round_summaries.append(summary)
-        self.round_event_counts = {name: 0 for name in EVENT_COUNT_NAMES}
+        self.round_event_counts_tensor.zero_()
 
     def spawn_wave(self, count):
         previous_family_version = self.state.family_capacity_version()
@@ -332,8 +331,7 @@ class TensorRank1VideoRun:
             return
         if self.device.type == 'cuda':
             if use_cuda_graph and not self.args.no_tensor_cuda_graph:
-                self.graph_runner(step_count).replay()
-                event_counts = None
+                event_counts = self.graph_runner(step_count).replay()
             else:
                 event_counts = self.state.compiled_snapshot_combat_steps(
                     step_count,
@@ -414,6 +412,7 @@ class TensorRank1VideoRun:
 
     def metrics(self, elapsed_seconds, frames_written, rendered_rounds, output):
         synchronize(self.device)
+        behavior_totals = self.behavior_totals_tensor.detach().cpu().to(torch.long).tolist()
         return {
             'active_cells_final': self.active_cell_count(),
             'action_device': str(self.device),
@@ -439,7 +438,7 @@ class TensorRank1VideoRun:
             'roundtime': int(npd.ROUNDTIME),
             'stationary_damage_after_steps': int(npd.STATIONARY_DAMAGE_AFTER_STEPS),
             'stationary_health_cost': float(npd.STATIONARY_HEALTH_COST),
-            'behavior_totals': dict(self.behavior_totals),
+            'behavior_totals': {name: int(value) for name, value in zip(EVENT_COUNT_NAMES, behavior_totals)},
             'round_metrics_csv': str(Path(output).with_suffix(Path(output).suffix + '.round_metrics.csv')),
             'output': str(output),
             'rounds_completed': self.rounds,
