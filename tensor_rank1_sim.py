@@ -1796,7 +1796,8 @@ class TensorRank1State:
             count,
             initial_health=2,
             coeff_scale=npd.FACTORED_WAVE_COEFF_SCALE,
-            sync_existing_positions=True):
+            sync_existing_positions=True,
+            precomputed_family=None):
         count = int(count)
         if count <= 0:
             return 0
@@ -1813,12 +1814,20 @@ class TensorRank1State:
         new_positions = torch.empty(spawn_count, 2, device=self.device, dtype=torch.long)
         new_positions[:, 0] = new_flat_positions.div(self.grid_stride, rounding_mode='floor')
         new_positions[:, 1] = new_flat_positions.remainder(self.grid_stride)
-        (
-            base_weight_1,
-            base_bias_1,
-            base_weight_2,
-            base_bias_2,
-        ) = self.weighted_survivor_family()
+        if precomputed_family is None:
+            (
+                base_weight_1,
+                base_bias_1,
+                base_weight_2,
+                base_bias_2,
+            ) = self.weighted_survivor_family()
+        else:
+            (
+                base_weight_1,
+                base_bias_1,
+                base_weight_2,
+                base_bias_2,
+            ) = precomputed_family
 
         new_family_id = self.families
         self.base_weight_1 = torch.cat((self.base_weight_1, base_weight_1.unsqueeze(0)), dim=0)
@@ -1887,7 +1896,8 @@ class TensorRank1State:
             family_count,
             count,
             initial_health=2,
-            coeff_scale=npd.FACTORED_WAVE_COEFF_SCALE):
+            coeff_scale=npd.FACTORED_WAVE_COEFF_SCALE,
+            precomputed_family=None):
         count = int(count)
         family_count = int(family_count)
         if count <= 0:
@@ -1905,12 +1915,20 @@ class TensorRank1State:
         empty_selection = torch.randperm(empties.shape[0], device=self.device)[:spawn_count]
         slots = inactive_slots[slot_selection]
         new_flat_positions = empties[empty_selection]
-        (
-            base_weight_1,
-            base_bias_1,
-            base_weight_2,
-            base_bias_2,
-        ) = self.weighted_survivor_family()
+        if precomputed_family is None:
+            (
+                base_weight_1,
+                base_bias_1,
+                base_weight_2,
+                base_bias_2,
+            ) = self.weighted_survivor_family()
+        else:
+            (
+                base_weight_1,
+                base_bias_1,
+                base_weight_2,
+                base_bias_2,
+            ) = precomputed_family
 
         self.base_weight_1[new_family_id] = base_weight_1
         self.base_weight_2[new_family_id] = base_weight_2
@@ -2498,6 +2516,7 @@ def benchmark_tensor_state(
                     and active_cell_count_for_refill_check() == 0):
                 _step = min(steps, _step + (wave_every - (_step % wave_every)))
             if wave_every > 0 and _step % wave_every == 0:
+                next_family = state.weighted_survivor_family()
                 state.apply_round_transition_health_cost(compact_dead=(not static_capacity and compact_every == 1))
                 invalidate_active_cell_count()
                 round_wave_size = scheduled_wave_size()
@@ -2508,6 +2527,7 @@ def benchmark_tensor_state(
                         round_wave_size,
                         initial_health=wave_initial_health,
                         coeff_scale=coeff_scale,
+                        precomputed_family=next_family,
                     )
                     clear_cuda_graphs_if_family_capacity_changed(previous_family_version)
                     apply_known_spawn_count(spawned)
@@ -2521,6 +2541,7 @@ def benchmark_tensor_state(
                         initial_health=wave_initial_health,
                         sync_existing_positions=(compact_every == 1),
                         coeff_scale=coeff_scale,
+                        precomputed_family=next_family,
                     )
                     apply_known_spawn_count(spawned)
                     waves_spawned += spawned
@@ -2531,6 +2552,7 @@ def benchmark_tensor_state(
                         initial_health=wave_initial_health,
                         sync_existing_positions=(compact_every == 1),
                         coeff_scale=coeff_scale,
+                        precomputed_family=next_family,
                     )
                     apply_known_spawn_count(spawned)
                     waves_spawned += spawned
@@ -2586,6 +2608,7 @@ def benchmark_tensor_state(
         'family_capacity': family_capacity,
         'family_basis_step': family_basis_step,
         'fitness_update_lr': npd.FITNESS_UPDATE_LR,
+        'round_transition_health_cost': npd.ROUND_TRANSITION_HEALTH_COST,
         'height': height,
         'health_dtype': health_dtype_name,
         'initial_health': initial_health,

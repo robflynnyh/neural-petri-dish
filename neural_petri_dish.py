@@ -1045,7 +1045,7 @@ def init(game, num=2500):
     return game
 
 ROUNDTIME = 500
-ROUND_TRANSITION_HEALTH_COST = 0
+ROUND_TRANSITION_HEALTH_COST = 2.5
 MOVEMENT_HEALTH_COST = 0.1
 STATIONARY_HEALTH_COST = 1
 STATIONARY_DAMAGE_AFTER_STEPS = 3
@@ -1149,7 +1149,7 @@ def main_tensor_rank1(args):
         if last_active_cells is not None:
             last_active_cells += int(spawned)
 
-    def spawn_wave(count):
+    def spawn_wave(count, precomputed_family=None):
         nonlocal active_family_count, graph_runner
         previous_family_version = state.family_capacity_version()
         spawned, active_family_count = state.append_static_weighted_wave(
@@ -1157,6 +1157,7 @@ def main_tensor_rank1(args):
             count,
             initial_health=args.tensor_wave_initial_health,
             coeff_scale=args.tensor_coeff_scale,
+            precomputed_family=precomputed_family,
         )
         if state.family_capacity_version() != previous_family_version:
             graph_runner = None
@@ -1238,9 +1239,10 @@ def main_tensor_rank1(args):
             countdown -= step_count
             frame += step_count
             if countdown == 0:
+                next_family = state.weighted_survivor_family()
                 state.apply_round_transition_health_cost()
                 invalidate_active_count()
-                spawned = spawn_wave(max(PER_WAVE - active_cell_count(), MIN_WAVE))
+                spawned = spawn_wave(max(PER_WAVE - active_cell_count(), MIN_WAVE), precomputed_family=next_family)
                 waves_spawned += spawned
                 countdown = ROUNDTIME
                 rounds += 1
@@ -1267,6 +1269,7 @@ def main_tensor_rank1(args):
             'snapshots': snapshots,
             'tensor_coeff_scale': args.tensor_coeff_scale,
             'fitness_update_lr': FITNESS_UPDATE_LR,
+            'round_transition_health_cost': ROUND_TRANSITION_HEALTH_COST,
             'tensor_network_dtype': str(network_dtype).removeprefix('torch.'),
             'tensor_network_dtype_requested': args.tensor_network_dtype,
             'tensor_stationary_health_cap': args.tensor_stationary_health_cap,

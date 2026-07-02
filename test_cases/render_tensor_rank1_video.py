@@ -343,13 +343,14 @@ class TensorRank1VideoRun:
         self.round_summaries.append(summary)
         self.round_event_counts_tensor.zero_()
 
-    def spawn_wave(self, count):
+    def spawn_wave(self, count, precomputed_family=None):
         previous_family_version = self.state.family_capacity_version()
         spawned, self.active_family_count = self.state.append_static_weighted_wave(
             self.active_family_count,
             count,
             initial_health=self.args.tensor_wave_initial_health,
             coeff_scale=self.args.tensor_coeff_scale,
+            precomputed_family=precomputed_family,
         )
         if self.state.family_capacity_version() != previous_family_version:
             self.graph_runners.clear()
@@ -404,10 +405,11 @@ class TensorRank1VideoRun:
         if self.countdown != 0:
             return
         self.record_round_summary()
+        next_family = self.state.weighted_survivor_family()
         self.state.apply_round_transition_health_cost()
         self.invalidate_active_count()
         wave_size = max(npd.PER_WAVE - self.active_cell_count(), npd.MIN_WAVE)
-        self.spawn_wave(wave_size)
+        self.spawn_wave(wave_size, precomputed_family=next_family)
         self.state.spawn_fixed_food()
         self.countdown = npd.ROUNDTIME
         self.rounds += 1

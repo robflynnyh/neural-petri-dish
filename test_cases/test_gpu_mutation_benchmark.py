@@ -1003,6 +1003,40 @@ def test_tensor_rank1_state_weighted_wave_uses_standardized_survival_update():
     assert_tensor_state_position_invariants(state)
 
 
+def test_tensor_rank1_round_penalty_applies_after_family_update_cpu():
+    torch.manual_seed(123)
+    state = TensorRank1State.fixed_capacity(
+        active_cells=4,
+        height=10,
+        width=10,
+        active_families=1,
+        family_capacity=3,
+        device=torch.device('cpu'),
+        initial_health=1,
+        cell_capacity=8,
+        npc_count=0,
+    )
+    state.round_survival_steps = torch.linspace(0, npd.ROUNDTIME, state.cells)
+    state.round_participants = torch.ones(state.cells, dtype=torch.bool)
+
+    pre_penalty_family = state.weighted_survivor_family()
+    state.apply_round_transition_health_cost()
+    spawned, family_count = state.append_static_weighted_wave(
+        1,
+        4,
+        initial_health=7,
+        precomputed_family=pre_penalty_family,
+    )
+
+    assert spawned == 4
+    assert family_count == 2
+    assert int((state.health == 7).sum().item()) == 4
+    assert torch.equal(state.base_weight_1[1], pre_penalty_family[0])
+    assert torch.equal(state.base_weight_2[1], pre_penalty_family[2])
+    assert torch.equal(state.bias_1[state.health == 7][0], pre_penalty_family[1])
+    assert torch.equal(state.bias_2[state.health == 7][0], pre_penalty_family[3])
+
+
 def test_tensor_rank1_fixed_capacity_inactive_family_slots_do_not_affect_rng_cpu():
     kwargs = dict(
         active_cells=4,
@@ -1274,7 +1308,7 @@ def test_tensor_rank1_disabling_event_counts_preserves_step_outputs_cpu():
     assert all(value == 0 for value in fast_counts.values())
 
 
-def test_tensor_rank1_round_transition_health_cost_is_disabled_cpu():
+def test_tensor_rank1_round_transition_health_cost_can_kill_survivors_cpu():
     torch.manual_seed(123)
     state = TensorRank1State.random(
         cells=3,
@@ -1284,14 +1318,14 @@ def test_tensor_rank1_round_transition_health_cost_is_disabled_cpu():
         device=torch.device('cpu'),
         initial_health=3,
     )
-    state.health = torch.tensor([1, 1, 2], dtype=state.health.dtype)
+    state.health = torch.tensor([1, 3, 4], dtype=state.health.dtype)
     state.rebuild_grids()
 
     state.apply_round_transition_health_cost()
 
-    assert state.health.tolist() == [1, 1, 2]
-    assert int((state.health > 0).sum().item()) == 3
-    assert int(state.index_grid.reshape(-1)[state.flat_positions[0]].item()) == 0
+    assert state.health.tolist() == [0, 0.5, 1.5]
+    assert int((state.health > 0).sum().item()) == 2
+    assert int(state.index_grid.reshape(-1)[state.flat_positions[0]].item()) == -1
     assert int(state.index_grid.reshape(-1)[state.flat_positions[1]].item()) == 1
     assert_tensor_state_position_invariants(state)
 
@@ -1746,5 +1780,5 @@ def test_tensor_rank1_benchmark_normal_round_refill_uses_live_cell_count_cpu():
     assert metrics['per_wave'] == 5
     assert metrics['min_wave'] == 2
     assert metrics['empty_refills'] == 0
-    assert metrics['waves_spawned'] == 4
-    assert metrics['active_cells_final'] == 8
+    assert metrics['waves_spawned'] == 10
+    assert metrics['active_cells_final'] == 5
