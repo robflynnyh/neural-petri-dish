@@ -18,11 +18,13 @@ from tensor_rank1_sim import (
     COMPILE_MODES,
     HEALTH_DTYPES,
     MATMUL_PRECISIONS,
+    NETWORK_DTYPES,
     CudaGraphFamilyBasisBlockRunner,
     TensorRank1State,
     refresh_runtime_constants,
     resolve_device,
     resolve_health_dtype,
+    resolve_network_dtype,
     synchronize,
 )
 
@@ -42,6 +44,14 @@ EVENT_COUNT_NAMES = (
     'stayed_put',
     'alive_end_sum',
     'npc_kills',
+    'npc_visible_cell_steps',
+    'npc_adjacent_cell_steps',
+    'npc_visible_move_away',
+    'npc_visible_move_toward',
+    'npc_visible_move_same',
+    'npc_visible_successful_escape',
+    'npc_visible_deaths',
+    'npc_visible_npc_kills',
 )
 
 
@@ -85,6 +95,7 @@ def parse_args():
     parser.add_argument('--tensor-stationary-health-cap', type=int, default=1)
     parser.add_argument('--tensor-static-refill-check-every', type=positive_int, default=100)
     parser.add_argument('--tensor-health-dtype', choices=tuple(HEALTH_DTYPES), default='float32')
+    parser.add_argument('--tensor-network-dtype', choices=('auto', *tuple(NETWORK_DTYPES)), default='auto')
     parser.add_argument('--tensor-compile-mode', choices=COMPILE_MODES, default='default')
     parser.add_argument('--tensor-matmul-precision', choices=MATMUL_PRECISIONS, default='high')
     parser.add_argument('--tensor-cuda-graph', dest='no_tensor_cuda_graph', action='store_false')
@@ -199,6 +210,7 @@ class TensorRank1VideoRun:
         self.round_start_active_cells = initial_cells
         self.round_ended_early = False
         self.round_early_countdown_remaining = 0
+        self.network_dtype = resolve_network_dtype(args.tensor_network_dtype, self.device)
         self.state = TensorRank1State.fixed_capacity(
             active_cells=initial_cells,
             height=size.lines,
@@ -209,6 +221,7 @@ class TensorRank1VideoRun:
             initial_health=args.tensor_initial_health,
             cell_capacity=args.tensor_cell_capacity,
             health_dtype=resolve_health_dtype(args.tensor_health_dtype),
+            network_dtype=self.network_dtype,
             coeff_scale=args.tensor_coeff_scale,
             stationary_health_cap=args.tensor_stationary_health_cap,
             npc_count=args.npc_count,
@@ -295,6 +308,10 @@ class TensorRank1VideoRun:
             'border_hit_rate': float(summary['border_hits'] / active_steps),
             'death_rate': float(summary['deaths'] / active_steps),
             'npc_kill_rate': float(summary['npc_kills'] / active_steps),
+            'npc_visible_move_away_rate': float(summary['npc_visible_move_away'] / max(1, summary['npc_visible_cell_steps'])),
+            'npc_visible_move_toward_rate': float(summary['npc_visible_move_toward'] / max(1, summary['npc_visible_cell_steps'])),
+            'npc_visible_death_rate': float(summary['npc_visible_deaths'] / max(1, summary['npc_visible_cell_steps'])),
+            'npc_adjacent_fraction': float(summary['npc_adjacent_cell_steps'] / active_steps),
             'stayed_put_rate': float(summary['stayed_put'] / active_steps),
         })
         self.round_summaries.append(summary)
@@ -458,6 +475,8 @@ class TensorRank1VideoRun:
             'output': str(output),
             'rounds_completed': self.rounds,
             'rendered_rounds': rendered_rounds,
+            'tensor_network_dtype': str(self.network_dtype).removeprefix('torch.'),
+            'tensor_network_dtype_requested': self.args.tensor_network_dtype,
             'waves_spawned': self.waves_spawned,
         }
 
@@ -521,6 +540,8 @@ def write_manifest(path, args, metrics):
         f'tensor_block_steps: {args.tensor_block_steps}',
         f'tensor_family_capacity: {args.tensor_family_capacity}',
         f'tensor_health_dtype: {args.tensor_health_dtype}',
+        f'tensor_network_dtype: {metrics["tensor_network_dtype"]}',
+        f'tensor_network_dtype_requested: {metrics["tensor_network_dtype_requested"]}',
         f'tensor_coeff_scale: {args.tensor_coeff_scale}',
         f'tensor_stationary_health_cap: {args.tensor_stationary_health_cap}',
         f'tensor_compile_mode: {args.tensor_compile_mode}',

@@ -14,6 +14,7 @@ from tensor_rank1_sim import (
     COMPILE_MODES,
     HEALTH_DTYPES,
     MATMUL_PRECISIONS,
+    NETWORK_DTYPES,
     benchmark_tensor_state,
     resolve_device,
 )
@@ -44,6 +45,7 @@ def parse_args():
     parser.add_argument('--tensor-cell-capacity', type=positive_int)
     parser.add_argument('--tensor-static-refill-check-every', type=positive_int, default=100)
     parser.add_argument('--tensor-health-dtype', choices=tuple(HEALTH_DTYPES), default='float32')
+    parser.add_argument('--tensor-network-dtype', choices=('auto', *tuple(NETWORK_DTYPES)), default='auto')
     parser.add_argument('--tensor-matmul-precision', choices=MATMUL_PRECISIONS, default='high')
     parser.add_argument('--tensor-compile-mode', choices=COMPILE_MODES, default='default')
     parser.add_argument('--tensor-compiled-block-steps', type=positive_int, default=10)
@@ -74,6 +76,7 @@ def run_tensor_rank1(args):
         device=resolve_device(device_name),
         initial_health=args.tensor_initial_health,
         health_dtype=args.tensor_health_dtype,
+        network_dtype=args.tensor_network_dtype,
         coeff_scale=args.tensor_coeff_scale,
         stationary_health_cap=args.tensor_stationary_health_cap,
         wave_every=npd.ROUNDTIME,

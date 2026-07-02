@@ -1076,6 +1076,7 @@ def main_tensor_rank1(args):
         TensorRank1State,
         resolve_device,
         resolve_health_dtype,
+        resolve_network_dtype,
         synchronize,
     )
 
@@ -1086,6 +1087,7 @@ def main_tensor_rank1(args):
         device_name = 'cuda' if torch.cuda.is_available() else 'cpu'
     device = resolve_device(device_name)
     health_dtype = resolve_health_dtype(args.tensor_health_dtype)
+    network_dtype = resolve_network_dtype(args.tensor_network_dtype, device)
     if args.tensor_matmul_precision is not None:
         torch.set_float32_matmul_precision(args.tensor_matmul_precision)
     board_capacity = (size.lines - 2) * size.columns
@@ -1101,6 +1103,7 @@ def main_tensor_rank1(args):
         initial_health=args.tensor_initial_health,
         cell_capacity=args.tensor_cell_capacity,
         health_dtype=health_dtype,
+        network_dtype=network_dtype,
         coeff_scale=args.tensor_coeff_scale,
         stationary_health_cap=args.tensor_stationary_health_cap,
     )
@@ -1264,6 +1267,8 @@ def main_tensor_rank1(args):
             'snapshots': snapshots,
             'tensor_coeff_scale': args.tensor_coeff_scale,
             'fitness_update_lr': FITNESS_UPDATE_LR,
+            'tensor_network_dtype': str(network_dtype).removeprefix('torch.'),
+            'tensor_network_dtype_requested': args.tensor_network_dtype,
             'tensor_stationary_health_cap': args.tensor_stationary_health_cap,
             'tensor_block_steps': block_steps,
             'waves_spawned': waves_spawned,
@@ -1397,6 +1402,7 @@ if __name__ == '__main__':
     parser.add_argument('--tensor-stationary-health-cap', type=int, default=1)
     parser.add_argument('--tensor-static-refill-check-every', type=positive_int, default=100)
     parser.add_argument('--tensor-health-dtype', choices=('float32', 'int64', 'int32'), default='float32')
+    parser.add_argument('--tensor-network-dtype', choices=('auto', 'float32', 'float16', 'bfloat16'), default='auto')
     parser.add_argument('--tensor-compile-mode', choices=('default', 'reduce-overhead', 'max-autotune'), default='default')
     parser.add_argument('--tensor-matmul-precision', choices=('highest', 'high', 'medium'), default='high')
     parser.add_argument('--tensor-cuda-graph', dest='no_tensor_cuda_graph', action='store_false')

@@ -1030,10 +1030,10 @@ def test_tensor_rank1_fixed_capacity_inactive_family_slots_do_not_affect_rng_cpu
         assert torch.equal(getattr(tight, field_name), getattr(padded, field_name))
     assert torch.equal(tight.base_weight_1, padded.base_weight_1[:2])
     assert torch.equal(tight.base_weight_2, padded.base_weight_2[:2])
-    assert torch.equal(tight.u_1, padded.u_1[:2])
-    assert torch.equal(tight.v_1, padded.v_1[:2])
-    assert torch.equal(tight.u_2, padded.u_2[:2])
-    assert torch.equal(tight.v_2, padded.v_2[:2])
+    assert torch.equal(tight.u_1, padded.u_1)
+    assert torch.equal(tight.v_1, padded.v_1)
+    assert torch.equal(tight.u_2, padded.u_2)
+    assert torch.equal(tight.v_2, padded.v_2)
     assert padded.base_weight_1[2:].eq(0).all()
     assert padded.base_weight_2[2:].eq(0).all()
     assert torch.equal(next_after_tight, next_after_padded)
@@ -1066,6 +1066,40 @@ def test_tensor_rank1_fixed_capacity_static_wave_keeps_shapes_cpu():
     assert state.family_index[state.health > 0].max().item() == 1
     assert_tensor_state_base_matmul_cache(state)
     assert_tensor_state_position_invariants(state)
+
+
+def test_tensor_rank1_network_dtype_only_changes_network_tensors_cpu():
+    torch.manual_seed(123)
+    state = TensorRank1State.fixed_capacity(
+        active_cells=4,
+        height=10,
+        width=10,
+        active_families=1,
+        family_capacity=3,
+        device=torch.device('cpu'),
+        initial_health=3,
+        cell_capacity=10,
+        network_dtype=torch.float16,
+    )
+
+    assert state.health.dtype == torch.float32
+    assert state.stationary_steps.dtype == torch.int16
+    assert state.round_survival_steps.dtype == torch.float32
+    for tensor in (
+            state.recurrent_state,
+            state.coeff_1,
+            state.coeff_2,
+            state.bias_1,
+            state.bias_2,
+            state.base_weight_1,
+            state.base_weight_2,
+            state.base_weight_1_matmul,
+            state.base_weight_2_matmul,
+            state.u_1,
+            state.v_1,
+            state.u_2,
+            state.v_2):
+        assert tensor.dtype == torch.float16
 
 
 def test_tensor_rank1_static_wave_reuses_dead_family_slot_cpu():

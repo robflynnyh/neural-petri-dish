@@ -22,6 +22,7 @@ NPC_INPUT_VALUE = npd.NPC_INPUT_VALUE
 BASE_ATTACK_DAMAGE = 1
 LONE_TARGET_DAMAGE_BONUS = 1
 NPC_DIRECTION_INDICES = (1, 2, 3, 4)
+EVENT_COUNT_DIM = 21
 _COMPILED_SNAPSHOT_COMBAT_STEP = {}
 _COMPILED_REBUILD_SNAPSHOT_COMBAT_STEP = {}
 _COMPILED_FAMILY_BASIS_REBUILD_SNAPSHOT_COMBAT_STEP = {}
@@ -30,6 +31,11 @@ HEALTH_DTYPES = {
     'float32': torch.float32,
     'int64': torch.long,
     'int32': torch.int32,
+}
+NETWORK_DTYPES = {
+    'float32': torch.float32,
+    'float16': torch.float16,
+    'bfloat16': torch.bfloat16,
 }
 MATMUL_PRECISIONS = ('highest', 'high', 'medium')
 COMPILE_MODES = ('default', 'reduce-overhead', 'max-autotune')
@@ -56,6 +62,26 @@ def resolve_health_dtype(name):
         return HEALTH_DTYPES[name]
     except KeyError as exc:
         raise ValueError(f'unsupported health dtype: {name}') from exc
+
+
+def resolve_network_dtype(name, device=None):
+    if isinstance(name, torch.dtype):
+        return name
+    if name == 'auto':
+        device = torch.device(device) if device is not None else torch.device('cpu')
+        if device.type == 'cuda':
+            return torch.float16
+        return torch.float32
+    try:
+        return NETWORK_DTYPES[name]
+    except KeyError as exc:
+        raise ValueError(f'unsupported network dtype: {name}') from exc
+
+
+def dtype_limit(dtype, requested):
+    if not torch.is_floating_point(torch.empty((), dtype=dtype)):
+        return requested
+    return min(float(requested), float(torch.finfo(dtype).max))
 
 
 def synchronize(device):
@@ -193,26 +219,32 @@ def normalize_rank1_factor_rows_(left, right):
     return left, right
 
 
-def init_linear_weight_bias(out_features, in_features, count, device):
-    weights = torch.empty(count, out_features, in_features, device=device)
-    biases = torch.empty(count, out_features, device=device)
+def init_linear_weight_bias(out_features, in_features, count, device, dtype=torch.float32):
+    weights = torch.empty(count, out_features, in_features, device=device, dtype=torch.float32)
+    biases = torch.empty(count, out_features, device=device, dtype=torch.float32)
     for index in range(count):
         torch.nn.init.kaiming_uniform_(weights[index], a=5 ** 0.5)
     bound = in_features ** -0.5
     torch.nn.init.uniform_(biases, -bound, bound)
-    return weights, biases
+    return weights.to(dtype), biases.to(dtype)
 
 
 def sanitize_recurrent_state(recurrent_state):
-    return torch.nan_to_num(recurrent_state, nan=0.0, posinf=ACTIVATION_LIMIT, neginf=0.0)
+    return torch.nan_to_num(
+        recurrent_state,
+        nan=0.0,
+        posinf=dtype_limit(recurrent_state.dtype, ACTIVATION_LIMIT),
+        neginf=0.0,
+    )
 
 
 def stabilize_hidden(hidden):
-    return hidden.clamp_(0.0, ACTIVATION_LIMIT)
+    return hidden.clamp_(0.0, dtype_limit(hidden.dtype, ACTIVATION_LIMIT))
 
 
 def stabilize_logits(logits):
-    return logits.clamp_(-LOGIT_LIMIT, LOGIT_LIMIT)
+    limit = dtype_limit(logits.dtype, LOGIT_LIMIT)
+    return logits.clamp_(-limit, limit)
 
 
 def apply_movement_health_cost(health, moved):
@@ -274,9 +306,9 @@ def snapshot_combat_step_tensors(
         v_2,
         neighbor_flat_offsets,
         direction_flat_deltas):
-    inputs = torch.empty(flat_positions.shape[0], INPUT_DIM, device=grid.device)
+    inputs = torch.empty(flat_positions.shape[0], INPUT_DIM, device=grid.device, dtype=base_weight_1.dtype)
     neighbor_indices = flat_positions[:, None] + neighbor_flat_offsets[None, :]
-    inputs[:, :NEIGHBOR_INPUT_DIM] = grid.reshape(-1)[neighbor_indices]
+    inputs[:, :NEIGHBOR_INPUT_DIM] = grid.reshape(-1)[neighbor_indices].to(inputs.dtype)
     inputs[:, NEIGHBOR_INPUT_DIM:] = sanitize_recurrent_state(recurrent_state)
 
     selected_base_weight_1 = base_weight_1[family_index]
@@ -374,9 +406,9 @@ def snapshot_combat_step_tensors_rebuild_grid(
         v_2,
         neighbor_flat_offsets,
         direction_flat_deltas):
-    inputs = torch.empty(flat_positions.shape[0], INPUT_DIM, device=grid.device)
+    inputs = torch.empty(flat_positions.shape[0], INPUT_DIM, device=grid.device, dtype=base_weight_1.dtype)
     neighbor_indices = flat_positions[:, None] + neighbor_flat_offsets[None, :]
-    inputs[:, :NEIGHBOR_INPUT_DIM] = grid.reshape(-1)[neighbor_indices]
+    inputs[:, :NEIGHBOR_INPUT_DIM] = grid.reshape(-1)[neighbor_indices].to(inputs.dtype)
     inputs[:, NEIGHBOR_INPUT_DIM:] = sanitize_recurrent_state(recurrent_state)
 
     selected_base_weight_1 = base_weight_1[family_index]
@@ -481,7 +513,12 @@ def snapshot_combat_step_tensors_family_basis_rebuild_grid(
         direction_flat_deltas):
     active = health > 0
     round_survival_steps = round_survival_steps + active.to(round_survival_steps.dtype)
-    inputs = torch.empty(flat_positions.shape[0], INPUT_DIM, device=index_grid.device)
+    inputs = torch.empty(
+        flat_positions.shape[0],
+        INPUT_DIM,
+        device=index_grid.device,
+        dtype=base_weight_1_matmul.dtype,
+    )
     neighbor_indices = flat_positions[:, None] + neighbor_flat_offsets[None, :]
     index_flat = index_grid.reshape(-1)
     # The family-basis compiled path treats index_grid as authoritative and
@@ -491,6 +528,7 @@ def snapshot_combat_step_tensors_family_basis_rebuild_grid(
     food_flat = food_grid.reshape(-1)
     neighbor_food = food_flat[neighbor_indices] > 0
     neighbor_npc = (neighbor_indices.unsqueeze(2) == npc_flat_positions.reshape(1, 1, -1)).any(dim=2)
+    npc_visible = active & neighbor_npc.any(dim=1)
     empty_food = (neighbor_values == -1) & neighbor_food & ~neighbor_npc
     inputs[:, :NEIGHBOR_INPUT_DIM] = (
         (neighbor_values >= 0).to(inputs.dtype)
@@ -554,6 +592,27 @@ def snapshot_combat_step_tensors_family_basis_rebuild_grid(
     new_stationary_steps = torch.where(new_health > 0, new_stationary_steps, torch.zeros_like(new_stationary_steps))
 
     alive = new_health > 0
+    if npc_flat_positions.numel() > 0:
+        grid_stride = index_grid.shape[1]
+        cell_rows = flat_positions.div(grid_stride, rounding_mode='floor')
+        cell_cols = flat_positions.remainder(grid_stride)
+        next_rows = new_flat_positions.div(grid_stride, rounding_mode='floor')
+        next_cols = new_flat_positions.remainder(grid_stride)
+        npc_rows = npc_flat_positions.div(grid_stride, rounding_mode='floor')
+        npc_cols = npc_flat_positions.remainder(grid_stride)
+        dist_before = (
+            (cell_rows.reshape(-1, 1) - npc_rows.reshape(1, -1)).abs()
+            + (cell_cols.reshape(-1, 1) - npc_cols.reshape(1, -1)).abs()
+        ).amin(dim=1)
+        dist_after_old_npcs = (
+            (next_rows.reshape(-1, 1) - npc_rows.reshape(1, -1)).abs()
+            + (next_cols.reshape(-1, 1) - npc_cols.reshape(1, -1)).abs()
+        ).amin(dim=1)
+        npc_adjacent = active & (dist_before <= 1)
+    else:
+        npc_adjacent = torch.zeros_like(active)
+        dist_before = torch.zeros_like(flat_positions)
+        dist_after_old_npcs = torch.zeros_like(flat_positions)
     old_npc_touch = (new_flat_positions.unsqueeze(1) == npc_flat_positions.reshape(1, -1)).any(dim=1)
     if npc_flat_positions.numel() > 0:
         npc_target_positions = npc_flat_positions + direction_flat_deltas[npc_direction_choices]
@@ -574,6 +633,13 @@ def snapshot_combat_step_tensors_family_basis_rebuild_grid(
     final_alive = alive & owns_position & ~npc_killed
     consumed_food = final_alive & hits_empty & (food_flat[target_flat_positions] > 0)
     move_success = final_alive & hits_empty
+    npc_visible_move = npc_visible & move_success
+    npc_visible_move_away = npc_visible_move & (dist_after_old_npcs > dist_before)
+    npc_visible_move_toward = npc_visible_move & (dist_after_old_npcs < dist_before)
+    npc_visible_move_same = npc_visible_move & (dist_after_old_npcs == dist_before)
+    npc_visible_successful_escape = npc_visible & final_alive & (dist_after_old_npcs > dist_before)
+    npc_visible_deaths = npc_visible & (active & ~final_alive)
+    npc_visible_npc_kills = npc_visible & npc_killed
     new_health = torch.where(
         consumed_food,
         (new_health + torch.as_tensor(FOOD_REWARD, device=index_grid.device, dtype=health.dtype)).clamp_max(MAX_HEALTH),
@@ -609,6 +675,14 @@ def snapshot_combat_step_tensors_family_basis_rebuild_grid(
         stayed_put.sum(),
         (new_health > 0).sum(),
         npc_killed.sum(),
+        npc_visible.sum(),
+        npc_adjacent.sum(),
+        npc_visible_move_away.sum(),
+        npc_visible_move_toward.sum(),
+        npc_visible_move_same.sum(),
+        npc_visible_successful_escape.sum(),
+        npc_visible_deaths.sum(),
+        npc_visible_npc_kills.sum(),
     )).to(torch.float32)
     return new_flat_positions, new_health, new_stationary_steps, hidden, actions, round_survival_steps, npc_flat_positions, event_counts
 
@@ -678,7 +752,7 @@ def family_basis_rebuild_snapshot_combat_block_tensors(block_steps):
             dead_scatter_indices,
             neighbor_flat_offsets,
             direction_flat_deltas):
-        total_event_counts = torch.zeros(13, device=health.device, dtype=torch.float32)
+        total_event_counts = torch.zeros(EVENT_COUNT_DIM, device=health.device, dtype=torch.float32)
         for step_index in range(block_steps):
             flat_positions, health, stationary_steps, recurrent_state, _actions, round_survival_steps, npc_flat_positions, event_counts = snapshot_combat_step_tensors_family_basis_rebuild_grid(
                 index_grid,
@@ -738,7 +812,7 @@ class CudaGraphFamilyBasisBlockRunner:
             compile_mode,
         )
         self.graph = torch.cuda.CUDAGraph()
-        self.event_counts = torch.empty(13, device=state.device, dtype=torch.float32)
+        self.event_counts = torch.empty(EVENT_COUNT_DIM, device=state.device, dtype=torch.float32)
         state.refresh_npc_random_directions(self.block_steps)
         original_index_grid = state.index_grid.clone()
         original_food_grid = state.food_grid.clone()
@@ -833,10 +907,12 @@ class TensorRank1State:
             device,
             initial_health=2,
             health_dtype=torch.float32,
+            network_dtype=torch.float32,
             coeff_scale=npd.FACTORED_WAVE_COEFF_SCALE,
             stationary_health_cap=1,
             npc_count=npd.NPC_COUNT):
         device = torch.device(device)
+        network_dtype = resolve_network_dtype(network_dtype, device)
         playable_rows = height - 2
         playable_cols = width
         if playable_rows <= 0:
@@ -863,21 +939,25 @@ class TensorRank1State:
         family_index = torch.randint(families, (cells,), device=device)
         health = torch.full((cells,), initial_health, device=device, dtype=health_dtype)
         stationary_steps = torch.zeros(cells, device=device, dtype=torch.int16)
-        recurrent_state = torch.zeros(cells, HIDDEN_DIM, device=device)
-        coeff_1 = torch.randn(cells, device=device) * coeff_scale
-        coeff_2 = torch.randn(cells, device=device) * coeff_scale
-        base_weight_1, family_bias_1 = init_linear_weight_bias(HIDDEN_DIM, INPUT_DIM, families, device)
-        base_weight_2, family_bias_2 = init_linear_weight_bias(OUTPUT_DIM, HIDDEN_DIM, families, device)
+        recurrent_state = torch.zeros(cells, HIDDEN_DIM, device=device, dtype=network_dtype)
+        coeff_1 = (torch.randn(cells, device=device, dtype=torch.float32) * coeff_scale).to(network_dtype)
+        coeff_2 = (torch.randn(cells, device=device, dtype=torch.float32) * coeff_scale).to(network_dtype)
+        base_weight_1, family_bias_1 = init_linear_weight_bias(HIDDEN_DIM, INPUT_DIM, families, device, network_dtype)
+        base_weight_2, family_bias_2 = init_linear_weight_bias(OUTPUT_DIM, HIDDEN_DIM, families, device, network_dtype)
         bias_1 = family_bias_1[family_index].clone()
         bias_2 = family_bias_2[family_index].clone()
         base_weight_1_matmul = flatten_base_weight_1_for_matmul(base_weight_1)
         base_weight_2_matmul = flatten_base_weight_2_for_matmul(base_weight_2)
-        u_1 = torch.randn(cells, HIDDEN_DIM, device=device)
-        v_1 = torch.randn(cells, INPUT_DIM, device=device)
-        u_2 = torch.randn(cells, OUTPUT_DIM, device=device)
-        v_2 = torch.randn(cells, HIDDEN_DIM, device=device)
+        u_1 = torch.randn(cells, HIDDEN_DIM, device=device, dtype=torch.float32)
+        v_1 = torch.randn(cells, INPUT_DIM, device=device, dtype=torch.float32)
+        u_2 = torch.randn(cells, OUTPUT_DIM, device=device, dtype=torch.float32)
+        v_2 = torch.randn(cells, HIDDEN_DIM, device=device, dtype=torch.float32)
         normalize_rank1_factor_rows_(u_1, v_1)
         normalize_rank1_factor_rows_(u_2, v_2)
+        u_1 = u_1.to(network_dtype)
+        v_1 = v_1.to(network_dtype)
+        u_2 = u_2.to(network_dtype)
+        v_2 = v_2.to(network_dtype)
 
         state = cls(
             grid=grid,
@@ -941,6 +1021,7 @@ class TensorRank1State:
             initial_health=2,
             cell_capacity=None,
             health_dtype=torch.float32,
+            network_dtype=torch.float32,
             coeff_scale=npd.FACTORED_WAVE_COEFF_SCALE,
             stationary_health_cap=1,
             npc_count=npd.NPC_COUNT):
@@ -960,6 +1041,7 @@ class TensorRank1State:
             device=device,
             initial_health=initial_health,
             health_dtype=health_dtype,
+            network_dtype=network_dtype,
             coeff_scale=coeff_scale,
             stationary_health_cap=stationary_health_cap,
             npc_count=0,
@@ -1064,11 +1146,23 @@ class TensorRank1State:
         extra = new_capacity - old_capacity
         self.base_weight_1 = torch.cat((
             self.base_weight_1,
-            torch.randn(extra, HIDDEN_DIM, INPUT_DIM, device=self.device),
+            torch.randn(
+                extra,
+                HIDDEN_DIM,
+                INPUT_DIM,
+                device=self.device,
+                dtype=self.base_weight_1.dtype,
+            ),
         ), dim=0)
         self.base_weight_2 = torch.cat((
             self.base_weight_2,
-            torch.randn(extra, OUTPUT_DIM, HIDDEN_DIM, device=self.device),
+            torch.randn(
+                extra,
+                OUTPUT_DIM,
+                HIDDEN_DIM,
+                device=self.device,
+                dtype=self.base_weight_2.dtype,
+            ),
         ), dim=0)
         self.refresh_base_weight_matmul_cache()
         self.single_active_family_id = None
@@ -1109,8 +1203,12 @@ class TensorRank1State:
 
     def input_buffer(self):
         cached = getattr(self, '_input_buffer', None)
-        if cached is None or cached.shape[0] != self.cells or cached.device != self.device:
-            cached = torch.empty(self.cells, INPUT_DIM, device=self.device)
+        if (
+                cached is None
+                or cached.shape[0] != self.cells
+                or cached.device != self.device
+                or cached.dtype != self.recurrent_state.dtype):
+            cached = torch.empty(self.cells, INPUT_DIM, device=self.device, dtype=self.recurrent_state.dtype)
             self._input_buffer = cached
         return cached
 
@@ -1526,24 +1624,37 @@ class TensorRank1State:
 
     def dense_weight_1(self):
         if self.cells == 0:
-            return torch.empty(0, HIDDEN_DIM, INPUT_DIM, device=self.device)
+            return torch.empty(0, HIDDEN_DIM, INPUT_DIM, device=self.device, dtype=self.base_weight_1.dtype)
         selected_base = self.base_weight_1[self.family_index]
         selected_direction = self.u_1.unsqueeze(2) * self.v_1.unsqueeze(1)
         return selected_base + self.coeff_1.reshape(-1, 1, 1) * selected_direction
 
     def dense_weight_2(self):
         if self.cells == 0:
-            return torch.empty(0, OUTPUT_DIM, HIDDEN_DIM, device=self.device)
+            return torch.empty(0, OUTPUT_DIM, HIDDEN_DIM, device=self.device, dtype=self.base_weight_2.dtype)
         selected_base = self.base_weight_2[self.family_index]
         selected_direction = self.u_2.unsqueeze(2) * self.v_2.unsqueeze(1)
         return selected_base + self.coeff_2.reshape(-1, 1, 1) * selected_direction
 
     def weighted_survivor_family(self):
         self.ensure_evolution_buffers()
+        network_dtype = self.base_weight_1.dtype
         participants = self.round_participants
         if self.cells == 0 or not bool(participants.any()):
-            base_weight_1, base_bias_1 = init_linear_weight_bias(HIDDEN_DIM, INPUT_DIM, 1, self.device)
-            base_weight_2, base_bias_2 = init_linear_weight_bias(OUTPUT_DIM, HIDDEN_DIM, 1, self.device)
+            base_weight_1, base_bias_1 = init_linear_weight_bias(
+                HIDDEN_DIM,
+                INPUT_DIM,
+                1,
+                self.device,
+                network_dtype,
+            )
+            base_weight_2, base_bias_2 = init_linear_weight_bias(
+                OUTPUT_DIM,
+                HIDDEN_DIM,
+                1,
+                self.device,
+                network_dtype,
+            )
             base_weight_1 = base_weight_1[0]
             base_weight_2 = base_weight_2[0]
             base_bias_1 = base_bias_1[0]
@@ -1584,6 +1695,11 @@ class TensorRank1State:
                 base_weight_2 = self.evolution_anchor_weight_2 + lr * update_weight_2
                 base_bias_1 = self.evolution_anchor_bias_1 + lr * update_bias_1
                 base_bias_2 = self.evolution_anchor_bias_2 + lr * update_bias_2
+
+        base_weight_1 = base_weight_1.to(network_dtype)
+        base_bias_1 = base_bias_1.to(network_dtype)
+        base_weight_2 = base_weight_2.to(network_dtype)
+        base_bias_2 = base_bias_2.to(network_dtype)
 
         self.evolution_anchor_weight_1 = base_weight_1.clone()
         self.evolution_anchor_bias_1 = base_bias_1.clone()
@@ -1648,12 +1764,17 @@ class TensorRank1State:
         self.base_weight_1 = torch.cat((self.base_weight_1, base_weight_1.unsqueeze(0)), dim=0)
         self.base_weight_2 = torch.cat((self.base_weight_2, base_weight_2.unsqueeze(0)), dim=0)
         self.refresh_base_weight_matmul_cache()
-        new_u_1 = torch.randn(spawn_count, HIDDEN_DIM, device=self.device)
-        new_v_1 = torch.randn(spawn_count, INPUT_DIM, device=self.device)
-        new_u_2 = torch.randn(spawn_count, OUTPUT_DIM, device=self.device)
-        new_v_2 = torch.randn(spawn_count, HIDDEN_DIM, device=self.device)
+        network_dtype = self.recurrent_state.dtype
+        new_u_1 = torch.randn(spawn_count, HIDDEN_DIM, device=self.device, dtype=torch.float32)
+        new_v_1 = torch.randn(spawn_count, INPUT_DIM, device=self.device, dtype=torch.float32)
+        new_u_2 = torch.randn(spawn_count, OUTPUT_DIM, device=self.device, dtype=torch.float32)
+        new_v_2 = torch.randn(spawn_count, HIDDEN_DIM, device=self.device, dtype=torch.float32)
         normalize_rank1_factor_rows_(new_u_1, new_v_1)
         normalize_rank1_factor_rows_(new_u_2, new_v_2)
+        new_u_1 = new_u_1.to(network_dtype)
+        new_v_1 = new_v_1.to(network_dtype)
+        new_u_2 = new_u_2.to(network_dtype)
+        new_v_2 = new_v_2.to(network_dtype)
 
         self.positions = torch.cat((self.positions, new_positions), dim=0)
         self.flat_positions = torch.cat((self.flat_positions, new_flat_positions), dim=0)
@@ -1667,14 +1788,20 @@ class TensorRank1State:
         ), dim=0)
         self.recurrent_state = torch.cat((
             self.recurrent_state,
-            torch.zeros(spawn_count, HIDDEN_DIM, device=self.device),
+            torch.zeros(spawn_count, HIDDEN_DIM, device=self.device, dtype=network_dtype),
         ), dim=0)
         self.family_index = torch.cat((
             self.family_index,
             torch.full((spawn_count,), new_family_id, device=self.device, dtype=self.family_index.dtype),
         ), dim=0)
-        self.coeff_1 = torch.cat((self.coeff_1, torch.randn(spawn_count, device=self.device) * coeff_scale), dim=0)
-        self.coeff_2 = torch.cat((self.coeff_2, torch.randn(spawn_count, device=self.device) * coeff_scale), dim=0)
+        self.coeff_1 = torch.cat((
+            self.coeff_1,
+            (torch.randn(spawn_count, device=self.device, dtype=torch.float32) * coeff_scale).to(network_dtype),
+        ), dim=0)
+        self.coeff_2 = torch.cat((
+            self.coeff_2,
+            (torch.randn(spawn_count, device=self.device, dtype=torch.float32) * coeff_scale).to(network_dtype),
+        ), dim=0)
         self.u_1 = torch.cat((self.u_1, new_u_1), dim=0)
         self.v_1 = torch.cat((self.v_1, new_v_1), dim=0)
         self.u_2 = torch.cat((self.u_2, new_u_2), dim=0)
@@ -1728,12 +1855,17 @@ class TensorRank1State:
         self.base_weight_1[new_family_id] = base_weight_1
         self.base_weight_2[new_family_id] = base_weight_2
         self.refresh_base_weight_matmul_cache_row(new_family_id)
-        new_u_1 = torch.randn(spawn_count, HIDDEN_DIM, device=self.device)
-        new_v_1 = torch.randn(spawn_count, INPUT_DIM, device=self.device)
-        new_u_2 = torch.randn(spawn_count, OUTPUT_DIM, device=self.device)
-        new_v_2 = torch.randn(spawn_count, HIDDEN_DIM, device=self.device)
+        network_dtype = self.recurrent_state.dtype
+        new_u_1 = torch.randn(spawn_count, HIDDEN_DIM, device=self.device, dtype=torch.float32)
+        new_v_1 = torch.randn(spawn_count, INPUT_DIM, device=self.device, dtype=torch.float32)
+        new_u_2 = torch.randn(spawn_count, OUTPUT_DIM, device=self.device, dtype=torch.float32)
+        new_v_2 = torch.randn(spawn_count, HIDDEN_DIM, device=self.device, dtype=torch.float32)
         normalize_rank1_factor_rows_(new_u_1, new_v_1)
         normalize_rank1_factor_rows_(new_u_2, new_v_2)
+        new_u_1 = new_u_1.to(network_dtype)
+        new_v_1 = new_v_1.to(network_dtype)
+        new_u_2 = new_u_2.to(network_dtype)
+        new_v_2 = new_v_2.to(network_dtype)
 
         self.flat_positions[slots] = new_flat_positions
         self.positions[slots, 0] = new_flat_positions.div(self.grid_stride, rounding_mode='floor')
@@ -1742,8 +1874,8 @@ class TensorRank1State:
         self.stationary_steps[slots] = 0
         self.recurrent_state[slots] = 0
         self.family_index[slots] = new_family_id
-        self.coeff_1[slots] = torch.randn(spawn_count, device=self.device) * coeff_scale
-        self.coeff_2[slots] = torch.randn(spawn_count, device=self.device) * coeff_scale
+        self.coeff_1[slots] = (torch.randn(spawn_count, device=self.device, dtype=torch.float32) * coeff_scale).to(network_dtype)
+        self.coeff_2[slots] = (torch.randn(spawn_count, device=self.device, dtype=torch.float32) * coeff_scale).to(network_dtype)
         self.u_1[slots] = new_u_1
         self.v_1[slots] = new_v_1
         self.u_2[slots] = new_u_2
@@ -1885,6 +2017,7 @@ def benchmark_tensor_state(
         static_refill_empty=False,
         static_refill_check_every=1,
         health_dtype='float32',
+        network_dtype='float32',
         coeff_scale=npd.FACTORED_WAVE_COEFF_SCALE,
         stationary_health_cap=1,
         static_rebuild_grid=False,
@@ -1911,6 +2044,8 @@ def benchmark_tensor_state(
     min_wave = npd.MIN_WAVE if min_wave is None else int(min_wave)
     health_dtype_name = health_dtype
     health_dtype = resolve_health_dtype(health_dtype)
+    network_dtype_name = network_dtype if isinstance(network_dtype, str) else str(network_dtype)
+    network_dtype = resolve_network_dtype(network_dtype, device)
     compile_mode = resolve_compile_mode(compile_mode)
     if matmul_precision is not None:
         if matmul_precision not in MATMUL_PRECISIONS:
@@ -1982,6 +2117,7 @@ def benchmark_tensor_state(
             initial_health=initial_health,
             cell_capacity=cell_capacity,
             health_dtype=health_dtype,
+            network_dtype=network_dtype,
             coeff_scale=coeff_scale,
             stationary_health_cap=stationary_health_cap,
         )
@@ -1995,6 +2131,7 @@ def benchmark_tensor_state(
             device=device,
             initial_health=initial_health,
             health_dtype=health_dtype,
+            network_dtype=network_dtype,
             coeff_scale=coeff_scale,
             stationary_health_cap=stationary_health_cap,
         )
@@ -2325,6 +2462,8 @@ def benchmark_tensor_state(
         'health_dtype': health_dtype_name,
         'initial_health': initial_health,
         'movement': movement,
+        'network_dtype': str(network_dtype).removeprefix('torch.'),
+        'network_dtype_requested': network_dtype_name,
         'min_wave': min_wave if normal_round_refill else None,
         'normal_round_refill': normal_round_refill,
         'matmul_precision': matmul_precision,
