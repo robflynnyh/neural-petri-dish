@@ -41,6 +41,7 @@ EVENT_COUNT_NAMES = (
     'deaths',
     'stayed_put',
     'alive_end_sum',
+    'npc_kills',
 )
 
 
@@ -80,6 +81,7 @@ def parse_args():
     parser.add_argument('--per-wave', type=positive_int, default=npd.PER_WAVE)
     parser.add_argument('--min-wave', type=positive_int, default=npd.MIN_WAVE)
     parser.add_argument('--roundtime', type=positive_int, default=npd.ROUNDTIME)
+    parser.add_argument('--npc-count', type=int, default=npd.NPC_COUNT)
     parser.add_argument('--tensor-stationary-health-cap', type=int, default=1)
     parser.add_argument('--tensor-static-refill-check-every', type=positive_int, default=100)
     parser.add_argument('--tensor-health-dtype', choices=tuple(HEALTH_DTYPES), default='float32')
@@ -99,7 +101,7 @@ def selected_rounds(render_rounds, round_stride):
     return [round_index * round_stride for round_index in range(render_rounds)]
 
 
-def tensor_status_text(health, family_index, food_grid, rounds, countdown, global_frame):
+def tensor_status_text(health, family_index, food_grid, npc_grid, rounds, countdown, global_frame):
     active_health = health[health > 0]
     if active_health.size:
         avghealth = round(float(active_health.mean()))
@@ -112,19 +114,24 @@ def tensor_status_text(health, family_index, food_grid, rounds, countdown, globa
     return (
         f'Frame {global_frame}  AVG HP {avghealth}  MAX HP {maxhealth}  '
         f'Cells {active_health.size}  unique base genomes: {unique_base_genomes}  '
-        f'Food {int(food_grid.sum())}  Rounds {rounds}  Countdown {countdown}'
+        f'Food {int(food_grid.sum())}  NPCs {int(npc_grid.sum())}  Rounds {rounds}  Countdown {countdown}'
     )
 
 
-def render_tensor_frame(index_grid, health, family_index, food_grid, size, rounds, countdown, global_frame, cell_size, status_height, font):
+def render_tensor_frame(index_grid, health, family_index, food_grid, npc_grid, size, rounds, countdown, global_frame, cell_size, status_height, font):
     visible = index_grid[2:size.lines, 2:size.columns + 2]
     visible_food = food_grid[2:size.lines, 2:size.columns + 2]
+    visible_npcs = npc_grid[2:size.lines, 2:size.columns + 2]
     rows, cols = visible.shape
     cells = np.full((rows, cols, 3), (8, 10, 14), dtype=np.uint8)
 
     food = visible_food > 0
     if np.any(food):
         cells[food] = (224, 190, 72)
+
+    npcs = visible_npcs > 0
+    if np.any(npcs):
+        cells[npcs] = (245, 64, 82)
 
     active = visible >= 0
     if np.any(active):
@@ -143,7 +150,7 @@ def render_tensor_frame(index_grid, health, family_index, food_grid, size, round
     draw.rectangle((0, status_y, cols * cell_size, rows * cell_size + status_height), fill=(14, 18, 24))
     draw.text(
         (6, status_y + 9),
-        tensor_status_text(health, family_index, food_grid, rounds, countdown, global_frame),
+        tensor_status_text(health, family_index, food_grid, npc_grid, rounds, countdown, global_frame),
         fill=(232, 238, 246),
         font=font,
     )
@@ -163,6 +170,7 @@ class TensorRank1VideoRun:
         npd.PER_WAVE = args.per_wave
         npd.MIN_WAVE = args.min_wave
         npd.ROUNDTIME = args.roundtime
+        npd.NPC_COUNT = args.npc_count
         refresh_runtime_constants()
         self.args = args
         size = npd.terminal_size(args.size)
@@ -203,6 +211,7 @@ class TensorRank1VideoRun:
             health_dtype=resolve_health_dtype(args.tensor_health_dtype),
             coeff_scale=args.tensor_coeff_scale,
             stationary_health_cap=args.tensor_stationary_health_cap,
+            npc_count=args.npc_count,
         )
         self.behavior_totals_tensor = torch.zeros(len(EVENT_COUNT_NAMES), device=self.device, dtype=torch.float64)
         self.round_event_counts_tensor = torch.zeros(len(EVENT_COUNT_NAMES), device=self.device, dtype=torch.float64)
@@ -285,6 +294,7 @@ class TensorRank1VideoRun:
             'attack_kill_rate': float(summary['attack_kills'] / active_steps),
             'border_hit_rate': float(summary['border_hits'] / active_steps),
             'death_rate': float(summary['deaths'] / active_steps),
+            'npc_kill_rate': float(summary['npc_kills'] / active_steps),
             'stayed_put_rate': float(summary['stayed_put'] / active_steps),
         })
         self.round_summaries.append(summary)
@@ -381,6 +391,7 @@ class TensorRank1VideoRun:
             self.state.health.detach().cpu().numpy(),
             self.state.family_index.detach().cpu().numpy(),
             self.state.food_grid.detach().cpu().numpy(),
+            self.state.npc_grid.detach().cpu().numpy(),
         )
 
     def render_round(self, writer, font):
@@ -389,12 +400,13 @@ class TensorRank1VideoRun:
             if self.round_should_end_early():
                 self.end_round_early()
                 break
-            index_grid, health, family_index, food_grid = self.snapshot()
+            index_grid, health, family_index, food_grid, npc_grid = self.snapshot()
             writer.append_data(render_tensor_frame(
                 index_grid,
                 health,
                 family_index,
                 food_grid,
+                npc_grid,
                 self.size,
                 self.rounds,
                 self.countdown,
@@ -433,6 +445,8 @@ class TensorRank1VideoRun:
             'kill_health_reward': float(npd.KILL_HEALTH_REWARD),
             'min_wave': int(npd.MIN_WAVE),
             'movement_health_cost': float(npd.MOVEMENT_HEALTH_COST),
+            'npc_count': int(self.state.npc_flat_positions.numel()),
+            'npc_input_value': float(npd.NPC_INPUT_VALUE),
             'per_wave': int(npd.PER_WAVE),
             'round_transition_health_cost': float(npd.ROUND_TRANSITION_HEALTH_COST),
             'roundtime': int(npd.ROUNDTIME),
@@ -518,6 +532,8 @@ def write_manifest(path, args, metrics):
         f'roundtime: {metrics["roundtime"]}',
         f'per_wave: {metrics["per_wave"]}',
         f'min_wave: {metrics["min_wave"]}',
+        f'npc_count: {metrics["npc_count"]}',
+        f'npc_input_value: {metrics["npc_input_value"]}',
         f'food_per_round: {metrics["food_per_round"]}',
         f'food_eaten_max_possible: {metrics["food_eaten_max_possible"]}',
         f'food_health_reward: {metrics["food_health_reward"]}',

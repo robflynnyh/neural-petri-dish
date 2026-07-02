@@ -18,8 +18,10 @@ MAX_HEALTH = 15
 KILL_REWARD = npd.KILL_HEALTH_REWARD
 FOOD_REWARD = npd.FOOD_HEALTH_REWARD
 FOOD_INPUT_VALUE = npd.FOOD_INPUT_VALUE
+NPC_INPUT_VALUE = npd.NPC_INPUT_VALUE
 BASE_ATTACK_DAMAGE = 1
 LONE_TARGET_DAMAGE_BONUS = 1
+NPC_DIRECTION_INDICES = (1, 2, 3, 4)
 _COMPILED_SNAPSHOT_COMBAT_STEP = {}
 _COMPILED_REBUILD_SNAPSHOT_COMBAT_STEP = {}
 _COMPILED_FAMILY_BASIS_REBUILD_SNAPSHOT_COMBAT_STEP = {}
@@ -36,10 +38,11 @@ LOGIT_LIMIT = 1.0e6
 
 
 def refresh_runtime_constants():
-    global KILL_REWARD, FOOD_REWARD, FOOD_INPUT_VALUE
+    global KILL_REWARD, FOOD_REWARD, FOOD_INPUT_VALUE, NPC_INPUT_VALUE
     KILL_REWARD = npd.KILL_HEALTH_REWARD
     FOOD_REWARD = npd.FOOD_HEALTH_REWARD
     FOOD_INPUT_VALUE = npd.FOOD_INPUT_VALUE
+    NPC_INPUT_VALUE = npd.NPC_INPUT_VALUE
 
 
 def resolve_device(name):
@@ -90,6 +93,10 @@ def make_food_grid(height, width, device):
     return torch.zeros(height + 2, width + 4, device=device, dtype=GRID_DTYPE)
 
 
+def make_npc_grid(height, width, device):
+    return torch.zeros(height + 2, width + 4, device=device, dtype=GRID_DTYPE)
+
+
 def fixed_food_flat_positions(height, width, count, device):
     count = int(count)
     if count <= 0:
@@ -115,6 +122,28 @@ def fixed_food_flat_positions(height, width, count, device):
         combined = torch.cat((unique_positions, all_positions), dim=0)
         unique_positions = torch.unique(combined, dim=0)[:count]
     return unique_positions[:, 0] * (int(width) + 4) + unique_positions[:, 1]
+
+
+def random_npc_flat_positions(index_grid, height, width, count, device):
+    count = int(count)
+    if count <= 0:
+        return torch.empty(0, device=device, dtype=torch.long)
+    playable = index_grid[2:-2, 2:-2].reshape(-1)
+    empty = torch.nonzero(playable == -1, as_tuple=False).reshape(-1)
+    spawn_count = min(count, int(empty.numel()))
+    if spawn_count <= 0:
+        return torch.empty(0, device=device, dtype=torch.long)
+    selected = empty[torch.randperm(empty.numel(), device=device)[:spawn_count]]
+    row = selected.div(int(width), rounding_mode='floor') + 2
+    col = selected.remainder(int(width)) + 2
+    return row * (int(width) + 4) + col
+
+
+def refresh_npc_grid(npc_grid, npc_flat_positions):
+    npc_grid.zero_()
+    if npc_flat_positions.numel() > 0:
+        npc_grid.reshape(-1).scatter_(0, npc_flat_positions, torch.ones_like(npc_flat_positions, dtype=npc_grid.dtype))
+    return npc_grid
 
 
 def refresh_food_overlay(grid, food_grid):
@@ -432,6 +461,8 @@ def snapshot_combat_step_tensors_family_basis_rebuild_grid(
         stationary_steps,
         recurrent_state,
         round_survival_steps,
+        npc_flat_positions,
+        npc_direction_choices,
         family_index,
         coeff_1,
         coeff_2,
@@ -459,11 +490,13 @@ def snapshot_combat_step_tensors_family_basis_rebuild_grid(
     neighbor_values = index_flat[neighbor_indices]
     food_flat = food_grid.reshape(-1)
     neighbor_food = food_flat[neighbor_indices] > 0
-    empty_food = (neighbor_values == -1) & neighbor_food
+    neighbor_npc = (neighbor_indices.unsqueeze(2) == npc_flat_positions.reshape(1, 1, -1)).any(dim=2)
+    empty_food = (neighbor_values == -1) & neighbor_food & ~neighbor_npc
     inputs[:, :NEIGHBOR_INPUT_DIM] = (
         (neighbor_values >= 0).to(inputs.dtype)
         - (neighbor_values == -2).to(inputs.dtype)
         + empty_food.to(inputs.dtype) * FOOD_INPUT_VALUE
+        + neighbor_npc.to(inputs.dtype) * NPC_INPUT_VALUE
     )
     inputs[:, NEIGHBOR_INPUT_DIM:] = sanitize_recurrent_state(recurrent_state)
 
@@ -521,6 +554,12 @@ def snapshot_combat_step_tensors_family_basis_rebuild_grid(
     new_stationary_steps = torch.where(new_health > 0, new_stationary_steps, torch.zeros_like(new_stationary_steps))
 
     alive = new_health > 0
+    old_npc_touch = (new_flat_positions.unsqueeze(1) == npc_flat_positions.reshape(1, -1)).any(dim=1)
+    if npc_flat_positions.numel() > 0:
+        npc_target_positions = npc_flat_positions + direction_flat_deltas[npc_direction_choices]
+        npc_target_values = index_flat[npc_target_positions]
+        npc_flat_positions = torch.where(npc_target_values != -2, npc_target_positions, npc_flat_positions)
+    new_npc_touch = (new_flat_positions.unsqueeze(1) == npc_flat_positions.reshape(1, -1)).any(dim=1)
     index_grid[2:-2, 2:-2].fill_(-1)
     write_indices = torch.where(alive, scatter_indices, dead_scatter_indices)
     index_flat.scatter_reduce_(
@@ -531,15 +570,26 @@ def snapshot_combat_step_tensors_family_basis_rebuild_grid(
         include_self=True,
     )
     owns_position = index_flat[new_flat_positions] == scatter_indices
-    consumed_food = alive & owns_position & hits_empty & (food_flat[target_flat_positions] > 0)
-    move_success = alive & owns_position & hits_empty
+    npc_killed = alive & owns_position & (old_npc_touch | new_npc_touch)
+    final_alive = alive & owns_position & ~npc_killed
+    consumed_food = final_alive & hits_empty & (food_flat[target_flat_positions] > 0)
+    move_success = final_alive & hits_empty
     new_health = torch.where(
         consumed_food,
         (new_health + torch.as_tensor(FOOD_REWARD, device=index_grid.device, dtype=health.dtype)).clamp_max(MAX_HEALTH),
         new_health,
     )
     clear_consumed_food(food_grid, target_flat_positions, consumed_food)
-    new_health = torch.where(alive & owns_position, new_health, torch.zeros_like(new_health))
+    new_health = torch.where(final_alive, new_health, torch.zeros_like(new_health))
+    index_grid[2:-2, 2:-2].fill_(-1)
+    final_write_indices = torch.where(final_alive, scatter_indices, dead_scatter_indices)
+    index_flat.scatter_reduce_(
+        0,
+        new_flat_positions,
+        final_write_indices,
+        reduce='amax',
+        include_self=True,
+    )
     new_stationary_steps = torch.where(
         new_health > 0,
         new_stationary_steps,
@@ -558,8 +608,9 @@ def snapshot_combat_step_tensors_family_basis_rebuild_grid(
         (active & (new_health <= 0)).sum(),
         stayed_put.sum(),
         (new_health > 0).sum(),
+        npc_killed.sum(),
     )).to(torch.float32)
-    return new_flat_positions, new_health, new_stationary_steps, hidden, actions, round_survival_steps, event_counts
+    return new_flat_positions, new_health, new_stationary_steps, hidden, actions, round_survival_steps, npc_flat_positions, event_counts
 
 
 def resolve_compile_mode(mode):
@@ -609,6 +660,8 @@ def family_basis_rebuild_snapshot_combat_block_tensors(block_steps):
             stationary_steps,
             recurrent_state,
             round_survival_steps,
+            npc_flat_positions,
+            npc_random_directions,
             family_index,
             coeff_1,
             coeff_2,
@@ -625,9 +678,9 @@ def family_basis_rebuild_snapshot_combat_block_tensors(block_steps):
             dead_scatter_indices,
             neighbor_flat_offsets,
             direction_flat_deltas):
-        total_event_counts = torch.zeros(12, device=health.device, dtype=torch.float32)
-        for _ in range(block_steps):
-            flat_positions, health, stationary_steps, recurrent_state, _actions, round_survival_steps, event_counts = snapshot_combat_step_tensors_family_basis_rebuild_grid(
+        total_event_counts = torch.zeros(13, device=health.device, dtype=torch.float32)
+        for step_index in range(block_steps):
+            flat_positions, health, stationary_steps, recurrent_state, _actions, round_survival_steps, npc_flat_positions, event_counts = snapshot_combat_step_tensors_family_basis_rebuild_grid(
                 index_grid,
                 food_grid,
                 flat_positions,
@@ -635,6 +688,8 @@ def family_basis_rebuild_snapshot_combat_block_tensors(block_steps):
                 stationary_steps,
                 recurrent_state,
                 round_survival_steps,
+                npc_flat_positions,
+                npc_random_directions[step_index],
                 family_index,
                 coeff_1,
                 coeff_2,
@@ -653,7 +708,7 @@ def family_basis_rebuild_snapshot_combat_block_tensors(block_steps):
                 direction_flat_deltas,
             )
             total_event_counts = total_event_counts + event_counts
-        return flat_positions, health, stationary_steps, recurrent_state, round_survival_steps, total_event_counts
+        return flat_positions, health, stationary_steps, recurrent_state, round_survival_steps, npc_flat_positions, total_event_counts
 
     return block_fn
 
@@ -683,17 +738,21 @@ class CudaGraphFamilyBasisBlockRunner:
             compile_mode,
         )
         self.graph = torch.cuda.CUDAGraph()
-        self.event_counts = torch.empty(12, device=state.device, dtype=torch.float32)
+        self.event_counts = torch.empty(13, device=state.device, dtype=torch.float32)
+        state.refresh_npc_random_directions(self.block_steps)
         original_index_grid = state.index_grid.clone()
         original_food_grid = state.food_grid.clone()
+        original_npc_grid = state.npc_grid.clone()
         original_flat_positions = state.flat_positions.clone()
+        original_npc_flat_positions = state.npc_flat_positions.clone()
+        original_npc_random_directions = state.npc_random_directions.clone()
         original_health = state.health.clone()
         original_stationary_steps = state.stationary_steps.clone()
         original_recurrent_state = state.recurrent_state.clone()
         original_round_survival_steps = state.round_survival_steps.clone()
 
         with torch.cuda.graph(self.graph):
-            flat_positions, health, stationary_steps, recurrent_state, round_survival_steps, event_counts = self.step_fn(
+            flat_positions, health, stationary_steps, recurrent_state, round_survival_steps, npc_flat_positions, event_counts = self.step_fn(
                 *state.family_basis_block_args()
             )
             state.flat_positions.copy_(flat_positions)
@@ -701,10 +760,14 @@ class CudaGraphFamilyBasisBlockRunner:
             state.stationary_steps.copy_(stationary_steps)
             state.recurrent_state.copy_(recurrent_state)
             state.round_survival_steps.copy_(round_survival_steps)
+            state.npc_flat_positions.copy_(npc_flat_positions)
             self.event_counts.copy_(event_counts)
         state.index_grid.copy_(original_index_grid)
         state.food_grid.copy_(original_food_grid)
+        state.npc_grid.copy_(original_npc_grid)
         state.flat_positions.copy_(original_flat_positions)
+        state.npc_flat_positions.copy_(original_npc_flat_positions)
+        state.npc_random_directions.copy_(original_npc_random_directions)
         state.health.copy_(original_health)
         state.stationary_steps.copy_(original_stationary_steps)
         state.recurrent_state.copy_(original_recurrent_state)
@@ -712,7 +775,9 @@ class CudaGraphFamilyBasisBlockRunner:
         synchronize(state.device)
 
     def replay(self):
+        self.state.refresh_npc_random_directions(self.block_steps)
         self.graph.replay()
+        refresh_npc_grid(self.state.npc_grid, self.state.npc_flat_positions)
         return self.event_counts
 
 
@@ -723,7 +788,10 @@ class TensorRank1State:
     grid: torch.Tensor
     index_grid: torch.Tensor
     food_grid: torch.Tensor
+    npc_grid: torch.Tensor
     food_flat_positions: torch.Tensor
+    npc_flat_positions: torch.Tensor
+    npc_random_directions: torch.Tensor
     positions: torch.Tensor
     flat_positions: torch.Tensor
     health: torch.Tensor
@@ -766,7 +834,8 @@ class TensorRank1State:
             initial_health=2,
             health_dtype=torch.float32,
             coeff_scale=npd.FACTORED_WAVE_COEFF_SCALE,
-            stationary_health_cap=1):
+            stationary_health_cap=1,
+            npc_count=npd.NPC_COUNT):
         device = torch.device(device)
         playable_rows = height - 2
         playable_cols = width
@@ -777,6 +846,7 @@ class TensorRank1State:
         grid = make_grid(height, width, device)
         index_grid = make_index_grid(height, width, device)
         food_grid = make_food_grid(height, width, device)
+        npc_grid = make_npc_grid(height, width, device)
         food_flat_positions = fixed_food_flat_positions(height, width, npd.FOOD_PER_ROUND, device)
         flat_positions = torch.randperm(playable_rows * playable_cols, device=device)[:cells]
         positions = torch.empty(cells, 2, device=device, dtype=torch.long)
@@ -787,6 +857,8 @@ class TensorRank1State:
         indices = torch.arange(cells, device=device, dtype=index_grid.dtype)
         grid.reshape(-1)[grid_flat_positions] = 1
         index_grid.reshape(-1)[grid_flat_positions] = indices
+        npc_flat_positions = random_npc_flat_positions(index_grid, height, width, npc_count, device)
+        refresh_npc_grid(npc_grid, npc_flat_positions)
 
         family_index = torch.randint(families, (cells,), device=device)
         health = torch.full((cells,), initial_health, device=device, dtype=health_dtype)
@@ -811,7 +883,10 @@ class TensorRank1State:
             grid=grid,
             index_grid=index_grid,
             food_grid=food_grid,
+            npc_grid=npc_grid,
             food_flat_positions=food_flat_positions,
+            npc_flat_positions=npc_flat_positions,
+            npc_random_directions=torch.zeros(1, npc_flat_positions.numel(), device=device, dtype=torch.long),
             positions=positions,
             flat_positions=grid_flat_positions,
             health=health,
@@ -867,7 +942,8 @@ class TensorRank1State:
             cell_capacity=None,
             health_dtype=torch.float32,
             coeff_scale=npd.FACTORED_WAVE_COEFF_SCALE,
-            stationary_health_cap=1):
+            stationary_health_cap=1,
+            npc_count=npd.NPC_COUNT):
         board_capacity = (height - 2) * width
         capacity = board_capacity if cell_capacity is None else int(cell_capacity)
         if active_cells > capacity:
@@ -886,6 +962,7 @@ class TensorRank1State:
             health_dtype=health_dtype,
             coeff_scale=coeff_scale,
             stationary_health_cap=stationary_health_cap,
+            npc_count=0,
         )
         state.reserve_inactive_family_slots(family_capacity)
         if active_cells > 0:
@@ -906,6 +983,14 @@ class TensorRank1State:
             grid_flat[state.flat_positions[inactive]] = 0
             index_flat[state.flat_positions[inactive]] = -1
             state.rebuild_grids()
+        state.npc_flat_positions = random_npc_flat_positions(state.index_grid, height, width, npc_count, state.device)
+        refresh_npc_grid(state.npc_grid, state.npc_flat_positions)
+        state.npc_random_directions = torch.zeros(
+            1,
+            state.npc_flat_positions.numel(),
+            device=state.device,
+            dtype=torch.long,
+        )
         state.single_active_family_id = None
         return state
 
@@ -1054,6 +1139,30 @@ class TensorRank1State:
             self._dead_mask_buffer = cached
         return cached
 
+    def refresh_npc_random_directions(self, block_steps):
+        block_steps = int(block_steps)
+        npc_count = int(self.npc_flat_positions.numel())
+        if (
+                self.npc_random_directions is None
+                or self.npc_random_directions.shape != (block_steps, npc_count)
+                or self.npc_random_directions.device != self.device):
+            self.npc_random_directions = torch.empty(
+                block_steps,
+                npc_count,
+                device=self.device,
+                dtype=torch.long,
+            )
+        if npc_count > 0:
+            choices = torch.as_tensor(NPC_DIRECTION_INDICES, device=self.device, dtype=torch.long)
+            random_indices = torch.randint(
+                choices.numel(),
+                (block_steps, npc_count),
+                device=self.device,
+                dtype=torch.long,
+            )
+            self.npc_random_directions.copy_(choices[random_indices])
+        return self.npc_random_directions
+
     def family_basis_block_args(self):
         return (
             self.index_grid,
@@ -1063,6 +1172,38 @@ class TensorRank1State:
             self.stationary_steps,
             self.recurrent_state,
             self.round_survival_steps,
+            self.npc_flat_positions,
+            self.npc_random_directions,
+            self.family_index,
+            self.coeff_1,
+            self.coeff_2,
+            self.bias_1,
+            self.bias_2,
+            self.base_weight_1_matmul,
+            self.base_weight_2_matmul,
+            self.u_1,
+            self.v_1,
+            self.u_2,
+            self.v_2,
+            self.stationary_health_cap,
+            self.index_grid_indices(),
+            self.dead_index_grid_indices(),
+            self.neighbor_flat_offsets,
+            self.direction_flat_deltas,
+        )
+
+    def family_basis_step_args(self):
+        self.refresh_npc_random_directions(1)
+        return (
+            self.index_grid,
+            self.food_grid,
+            self.flat_positions,
+            self.health,
+            self.stationary_steps,
+            self.recurrent_state,
+            self.round_survival_steps,
+            self.npc_flat_positions,
+            self.npc_random_directions[0],
             self.family_index,
             self.coeff_1,
             self.coeff_2,
@@ -1453,7 +1594,8 @@ class TensorRank1State:
 
     def empty_positions(self):
         playable = self.index_grid[2:-2, 2:-2].reshape(-1)
-        empty_flat = torch.nonzero(playable == -1, as_tuple=False).reshape(-1)
+        npc_playable = self.npc_grid[2:-2, 2:-2].reshape(-1)
+        empty_flat = torch.nonzero((playable == -1) & (npc_playable == 0), as_tuple=False).reshape(-1)
         if empty_flat.numel() == 0:
             return torch.empty(0, 2, device=self.device, dtype=torch.long)
         rows, cols = self.playable_shape
@@ -1464,7 +1606,8 @@ class TensorRank1State:
 
     def empty_flat_positions(self):
         playable = self.index_grid[2:-2, 2:-2].reshape(-1)
-        empty_flat = torch.nonzero(playable == -1, as_tuple=False).reshape(-1)
+        npc_playable = self.npc_grid[2:-2, 2:-2].reshape(-1)
+        empty_flat = torch.nonzero((playable == -1) & (npc_playable == 0), as_tuple=False).reshape(-1)
         if empty_flat.numel() == 0:
             return torch.empty(0, device=self.device, dtype=torch.long)
         _rows, cols = self.playable_shape
@@ -1662,8 +1805,10 @@ class TensorRank1State:
                 self.recurrent_state,
                 actions,
                 self.round_survival_steps,
+                self.npc_flat_positions,
                 event_counts,
-            ) = step_fn(*self.family_basis_block_args())
+            ) = step_fn(*self.family_basis_step_args())
+            refresh_npc_grid(self.npc_grid, self.npc_flat_positions)
             return event_counts
         else:
             if rebuild_grid:
@@ -1703,6 +1848,7 @@ class TensorRank1State:
             )
         if not (rebuild_grid and family_basis):
             raise ValueError('compiled block steps currently require rebuild_grid and family_basis')
+        self.refresh_npc_random_directions(block_steps)
         step_fn = compiled_family_basis_rebuild_snapshot_combat_block_tensors(block_steps, compile_mode)
         (
             self.flat_positions,
@@ -1710,8 +1856,10 @@ class TensorRank1State:
             self.stationary_steps,
             self.recurrent_state,
             self.round_survival_steps,
+            self.npc_flat_positions,
             event_counts,
         ) = step_fn(*self.family_basis_block_args())
+        refresh_npc_grid(self.npc_grid, self.npc_flat_positions)
         return event_counts
 
 def benchmark_tensor_state(

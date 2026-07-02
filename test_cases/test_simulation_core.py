@@ -909,3 +909,23 @@ def test_tensor_rank1_clear_consumed_food_handles_duplicate_targets():
     rank1.clear_consumed_food(food_grid, targets, consumed)
 
     assert int(food_grid.reshape(-1)[7]) == 0
+
+
+def test_tensor_rank1_fixed_capacity_places_npcs_away_from_live_cells():
+    import tensor_rank1_sim as rank1
+
+    state = rank1.TensorRank1State.fixed_capacity(
+        active_cells=8,
+        height=8,
+        width=8,
+        active_families=1,
+        family_capacity=2,
+        device='cpu',
+        npc_count=10,
+    )
+    alive_positions = set(state.flat_positions[state.health > 0].tolist())
+    npc_positions = state.npc_flat_positions.tolist()
+
+    assert len(npc_positions) == 10
+    assert int(state.npc_grid.sum().item()) == 10
+    assert alive_positions.isdisjoint(npc_positions)
