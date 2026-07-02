@@ -104,11 +104,24 @@ def add_event_count_summary(metrics, window=100):
     if not trace_segments or 'event_counts' not in trace_segments[0]:
         return
     window = min(int(window), len(trace_segments))
+    max_start = max(len(trace_segments) - window, 0)
+    sample_count = min(10, max_start + 1)
+    if sample_count <= 1:
+        sampled_starts = [0]
+    else:
+        sampled_starts = sorted({
+            int(round(index * max_start / (sample_count - 1)))
+            for index in range(sample_count)
+        })
     metrics['event_count_summary'] = {
         'window_rounds': window,
         'all': event_window_summary(trace_segments, 0, len(trace_segments)),
         'first_window': event_window_summary(trace_segments, 0, window),
         'last_window': event_window_summary(trace_segments, len(trace_segments) - window, len(trace_segments)),
+        'sampled_windows': [
+            event_window_summary(trace_segments, start, start + window)
+            for start in sampled_starts
+        ],
     }
 
 
