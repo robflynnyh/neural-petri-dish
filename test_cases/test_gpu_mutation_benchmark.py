@@ -1221,6 +1221,9 @@ def test_tensor_rank1_cell_dies_when_moving_into_npc_old_tile_cpu():
     assert event_counts['npc_visible_npc_kills'] == 1
     assert event_counts['npc_visible_final_alive'] == 0
     assert event_counts['npc_visible_final_clear'] == 0
+    assert event_counts['npc_adjacent_deaths'] == 1
+    assert event_counts['npc_adjacent_final_alive'] == 0
+    assert event_counts['npc_adjacent_final_clear'] == 0
 
 
 def test_tensor_rank1_cell_dies_when_npc_moves_into_cell_cpu():
@@ -1250,6 +1253,10 @@ def test_tensor_rank1_cell_dies_when_npc_moves_into_cell_cpu():
     assert event_counts['npc_visible_npc_kills'] == 1
     assert event_counts['npc_visible_final_alive'] == 0
     assert event_counts['npc_visible_final_clear'] == 0
+    assert event_counts['npc_adjacent_deaths'] == 1
+    assert event_counts['npc_adjacent_final_alive'] == 0
+    assert event_counts['npc_adjacent_final_clear'] == 0
+    assert event_counts['npc_adjacent_stayed_put'] == 1
 
 
 def test_tensor_rank1_npc_visible_escape_metrics_use_final_npc_position_cpu():
@@ -1280,6 +1287,11 @@ def test_tensor_rank1_npc_visible_escape_metrics_use_final_npc_position_cpu():
     assert event_counts['npc_visible_final_adjacent'] == 0
     assert event_counts['npc_visible_final_farther'] == 1
     assert event_counts['npc_visible_final_closer'] == 0
+    assert event_counts['npc_adjacent_deaths'] == 0
+    assert event_counts['npc_adjacent_final_alive'] == 1
+    assert event_counts['npc_adjacent_final_clear'] == 1
+    assert event_counts['npc_adjacent_move_away'] == 1
+    assert event_counts['npc_adjacent_move_toward'] == 0
 
 
 def test_tensor_rank1_disabling_event_counts_preserves_step_outputs_cpu():

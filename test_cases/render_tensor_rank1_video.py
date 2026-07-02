@@ -107,6 +107,7 @@ def dodge_window_summary(round_summaries, start, end):
         return {}
     active_steps = max(1, sum(row['active_cell_steps'] for row in rows))
     visible_steps = max(1, sum(row['npc_visible_cell_steps'] for row in rows))
+    adjacent_steps = max(1, sum(row['npc_adjacent_cell_steps'] for row in rows))
     participant_cells = max(1, sum(row['participant_cells'] for row in rows))
     return {
         'round_start': int(rows[0]['round']),
@@ -120,6 +121,10 @@ def dodge_window_summary(round_summaries, start, end):
         'npc_visible_move_toward_rate': float(sum(row['npc_visible_move_toward'] for row in rows) / visible_steps),
         'npc_visible_death_rate': float(sum(row['npc_visible_deaths'] for row in rows) / visible_steps),
         'npc_adjacent_fraction': float(sum(row['npc_adjacent_cell_steps'] for row in rows) / active_steps),
+        'npc_adjacent_death_rate': float(sum(row['npc_adjacent_deaths'] for row in rows) / adjacent_steps),
+        'npc_adjacent_final_clear_rate': float(sum(row['npc_adjacent_final_clear'] for row in rows) / adjacent_steps),
+        'npc_adjacent_move_away_rate': float(sum(row['npc_adjacent_move_away'] for row in rows) / adjacent_steps),
+        'npc_adjacent_stayed_put_rate': float(sum(row['npc_adjacent_stayed_put'] for row in rows) / adjacent_steps),
         'npc_kill_rate': float(sum(row['npc_kills'] for row in rows) / active_steps),
         'death_rate': float(sum(row['deaths'] for row in rows) / active_steps),
         'move_success_rate': float(sum(row['move_successes'] for row in rows) / active_steps),
@@ -322,6 +327,7 @@ class TensorRank1VideoRun:
         event_counts = self.round_event_counts_tensor.detach().cpu().to(torch.long).tolist()
         summary.update({name: int(value) for name, value in zip(EVENT_COUNT_NAMES, event_counts)})
         active_steps = max(1, summary['active_cell_steps'])
+        adjacent_steps = max(1, summary['npc_adjacent_cell_steps'])
         participants_count = max(1, summary['participant_cells'])
         summary.update({
             'survivor_fraction': float(summary['ended_cells'] / participants_count),
@@ -338,6 +344,10 @@ class TensorRank1VideoRun:
             'npc_visible_move_toward_rate': float(summary['npc_visible_move_toward'] / max(1, summary['npc_visible_cell_steps'])),
             'npc_visible_death_rate': float(summary['npc_visible_deaths'] / max(1, summary['npc_visible_cell_steps'])),
             'npc_adjacent_fraction': float(summary['npc_adjacent_cell_steps'] / active_steps),
+            'npc_adjacent_death_rate': float(summary['npc_adjacent_deaths'] / adjacent_steps),
+            'npc_adjacent_final_clear_rate': float(summary['npc_adjacent_final_clear'] / adjacent_steps),
+            'npc_adjacent_move_away_rate': float(summary['npc_adjacent_move_away'] / adjacent_steps),
+            'npc_adjacent_stayed_put_rate': float(summary['npc_adjacent_stayed_put'] / adjacent_steps),
             'stayed_put_rate': float(summary['stayed_put'] / active_steps),
         })
         self.round_summaries.append(summary)

@@ -76,6 +76,7 @@ def event_window_summary(trace_segments, start, end):
             counts[name] += int(event_counts.get(name, 0))
     active_steps = max(1, counts['active_cell_steps'])
     visible_steps = max(1, counts['npc_visible_cell_steps'])
+    adjacent_steps = max(1, counts['npc_adjacent_cell_steps'])
     counts.update({
         'round_start': int(start + 1),
         'round_end': int(end),
@@ -94,6 +95,13 @@ def event_window_summary(trace_segments, start, end):
         'npc_visible_final_adjacent_rate': counts['npc_visible_final_adjacent'] / visible_steps,
         'npc_visible_final_farther_rate': counts['npc_visible_final_farther'] / visible_steps,
         'npc_visible_final_closer_rate': counts['npc_visible_final_closer'] / visible_steps,
+        'npc_adjacent_death_rate': counts['npc_adjacent_deaths'] / adjacent_steps,
+        'npc_adjacent_final_alive_rate': counts['npc_adjacent_final_alive'] / adjacent_steps,
+        'npc_adjacent_final_clear_rate': counts['npc_adjacent_final_clear'] / adjacent_steps,
+        'npc_adjacent_final_adjacent_rate': counts['npc_adjacent_final_adjacent'] / adjacent_steps,
+        'npc_adjacent_move_away_rate': counts['npc_adjacent_move_away'] / adjacent_steps,
+        'npc_adjacent_move_toward_rate': counts['npc_adjacent_move_toward'] / adjacent_steps,
+        'npc_adjacent_stayed_put_rate': counts['npc_adjacent_stayed_put'] / adjacent_steps,
         'stayed_put_rate': counts['stayed_put'] / active_steps,
     })
     return counts

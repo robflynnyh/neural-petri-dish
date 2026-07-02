@@ -49,6 +49,13 @@ EVENT_COUNT_NAMES = (
     'npc_visible_final_adjacent',
     'npc_visible_final_farther',
     'npc_visible_final_closer',
+    'npc_adjacent_deaths',
+    'npc_adjacent_final_alive',
+    'npc_adjacent_final_clear',
+    'npc_adjacent_final_adjacent',
+    'npc_adjacent_move_away',
+    'npc_adjacent_move_toward',
+    'npc_adjacent_stayed_put',
 )
 EVENT_COUNT_DIM = len(EVENT_COUNT_NAMES)
 _COMPILED_SNAPSHOT_COMBAT_STEP = {}
@@ -708,6 +715,14 @@ def snapshot_combat_step_tensors_family_basis_rebuild_grid(
         npc_visible_final_adjacent = npc_visible_final_alive & (dist_after_new_npcs <= 1)
         npc_visible_final_farther = npc_visible_final_alive & (dist_after_new_npcs > dist_before)
         npc_visible_final_closer = npc_visible_final_alive & (dist_after_new_npcs < dist_before)
+        npc_adjacent_move = npc_adjacent & move_success
+        npc_adjacent_deaths = npc_adjacent & (active & ~final_alive)
+        npc_adjacent_final_alive = npc_adjacent & final_alive
+        npc_adjacent_final_clear = npc_adjacent_final_alive & (dist_after_new_npcs > 1)
+        npc_adjacent_final_adjacent = npc_adjacent_final_alive & (dist_after_new_npcs <= 1)
+        npc_adjacent_move_away = npc_adjacent_move & (dist_after_old_npcs > dist_before)
+        npc_adjacent_move_toward = npc_adjacent_move & (dist_after_old_npcs < dist_before)
+        npc_adjacent_stayed_put = npc_adjacent & stayed_put
         event_counts = torch.stack((
             active.sum(),
             move_intents.sum(),
@@ -735,6 +750,13 @@ def snapshot_combat_step_tensors_family_basis_rebuild_grid(
             npc_visible_final_adjacent.sum(),
             npc_visible_final_farther.sum(),
             npc_visible_final_closer.sum(),
+            npc_adjacent_deaths.sum(),
+            npc_adjacent_final_alive.sum(),
+            npc_adjacent_final_clear.sum(),
+            npc_adjacent_final_adjacent.sum(),
+            npc_adjacent_move_away.sum(),
+            npc_adjacent_move_toward.sum(),
+            npc_adjacent_stayed_put.sum(),
         )).to(torch.float32)
     else:
         event_counts = torch.zeros(EVENT_COUNT_DIM, device=index_grid.device, dtype=torch.float32)
@@ -2306,6 +2328,7 @@ def benchmark_tensor_state(
         values = {name: int(value) for name, value in zip(event_count_names, counts)}
         active_steps = max(1, values['active_cell_steps'])
         visible_steps = max(1, values['npc_visible_cell_steps'])
+        adjacent_steps = max(1, values['npc_adjacent_cell_steps'])
         values.update({
             'move_success_rate': values['move_successes'] / active_steps,
             'death_rate': values['deaths'] / active_steps,
@@ -2320,6 +2343,13 @@ def benchmark_tensor_state(
             'npc_visible_final_adjacent_rate': values['npc_visible_final_adjacent'] / visible_steps,
             'npc_visible_final_farther_rate': values['npc_visible_final_farther'] / visible_steps,
             'npc_visible_final_closer_rate': values['npc_visible_final_closer'] / visible_steps,
+            'npc_adjacent_death_rate': values['npc_adjacent_deaths'] / adjacent_steps,
+            'npc_adjacent_final_alive_rate': values['npc_adjacent_final_alive'] / adjacent_steps,
+            'npc_adjacent_final_clear_rate': values['npc_adjacent_final_clear'] / adjacent_steps,
+            'npc_adjacent_final_adjacent_rate': values['npc_adjacent_final_adjacent'] / adjacent_steps,
+            'npc_adjacent_move_away_rate': values['npc_adjacent_move_away'] / adjacent_steps,
+            'npc_adjacent_move_toward_rate': values['npc_adjacent_move_toward'] / adjacent_steps,
+            'npc_adjacent_stayed_put_rate': values['npc_adjacent_stayed_put'] / adjacent_steps,
             'stayed_put_rate': values['stayed_put'] / active_steps,
         })
         return values
