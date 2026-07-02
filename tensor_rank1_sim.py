@@ -557,7 +557,6 @@ def snapshot_combat_step_tensors_family_basis_rebuild_grid(
     food_flat = food_grid.reshape(-1)
     neighbor_food = food_flat[neighbor_indices] > 0
     neighbor_npc = (neighbor_indices.unsqueeze(2) == npc_flat_positions.reshape(1, 1, -1)).any(dim=2)
-    npc_visible = active & neighbor_npc.any(dim=1)
     empty_food = (neighbor_values == -1) & neighbor_food & ~neighbor_npc
     inputs[:, :NEIGHBOR_INPUT_DIM] = (
         (neighbor_values >= 0).to(inputs.dtype)
@@ -673,19 +672,6 @@ def snapshot_combat_step_tensors_family_basis_rebuild_grid(
     npc_killed = alive & owns_position & (old_npc_touch | new_npc_touch)
     final_alive = alive & owns_position & ~npc_killed
     consumed_food = final_alive & hits_empty & (food_flat[target_flat_positions] > 0)
-    move_success = final_alive & hits_empty
-    npc_visible_move = npc_visible & move_success
-    npc_visible_move_away = npc_visible_move & (dist_after_old_npcs > dist_before)
-    npc_visible_move_toward = npc_visible_move & (dist_after_old_npcs < dist_before)
-    npc_visible_move_same = npc_visible_move & (dist_after_old_npcs == dist_before)
-    npc_visible_successful_escape = npc_visible & final_alive & (dist_after_old_npcs > dist_before)
-    npc_visible_deaths = npc_visible & (active & ~final_alive)
-    npc_visible_npc_kills = npc_visible & npc_killed
-    npc_visible_final_alive = npc_visible & final_alive
-    npc_visible_final_clear = npc_visible_final_alive & (dist_after_new_npcs > 1)
-    npc_visible_final_adjacent = npc_visible_final_alive & (dist_after_new_npcs <= 1)
-    npc_visible_final_farther = npc_visible_final_alive & (dist_after_new_npcs > dist_before)
-    npc_visible_final_closer = npc_visible_final_alive & (dist_after_new_npcs < dist_before)
     new_health = torch.where(
         consumed_food,
         (new_health + torch.as_tensor(FOOD_REWARD, device=index_grid.device, dtype=health.dtype)).clamp_max(MAX_HEALTH),
@@ -707,34 +693,51 @@ def snapshot_combat_step_tensors_family_basis_rebuild_grid(
         new_stationary_steps,
         torch.zeros_like(new_stationary_steps),
     )
-    event_counts = torch.stack((
-        active.sum(),
-        move_intents.sum(),
-        move_success.sum(),
-        attack_intents.sum(),
-        hits_occupied.sum(),
-        target_killed.sum(),
-        lone_target_hits.sum(),
-        hits_border.sum(),
-        consumed_food.sum(),
-        (active & (new_health <= 0)).sum(),
-        stayed_put.sum(),
-        (new_health > 0).sum(),
-        npc_killed.sum(),
-        npc_visible.sum(),
-        npc_adjacent.sum(),
-        npc_visible_move_away.sum(),
-        npc_visible_move_toward.sum(),
-        npc_visible_move_same.sum(),
-        npc_visible_successful_escape.sum(),
-        npc_visible_deaths.sum(),
-        npc_visible_npc_kills.sum(),
-        npc_visible_final_alive.sum(),
-        npc_visible_final_clear.sum(),
-        npc_visible_final_adjacent.sum(),
-        npc_visible_final_farther.sum(),
-        npc_visible_final_closer.sum(),
-    )).to(torch.float32)
+    if collect_event_counts:
+        npc_visible = active & neighbor_npc.any(dim=1)
+        move_success = final_alive & hits_empty
+        npc_visible_move = npc_visible & move_success
+        npc_visible_move_away = npc_visible_move & (dist_after_old_npcs > dist_before)
+        npc_visible_move_toward = npc_visible_move & (dist_after_old_npcs < dist_before)
+        npc_visible_move_same = npc_visible_move & (dist_after_old_npcs == dist_before)
+        npc_visible_successful_escape = npc_visible & final_alive & (dist_after_old_npcs > dist_before)
+        npc_visible_deaths = npc_visible & (active & ~final_alive)
+        npc_visible_npc_kills = npc_visible & npc_killed
+        npc_visible_final_alive = npc_visible & final_alive
+        npc_visible_final_clear = npc_visible_final_alive & (dist_after_new_npcs > 1)
+        npc_visible_final_adjacent = npc_visible_final_alive & (dist_after_new_npcs <= 1)
+        npc_visible_final_farther = npc_visible_final_alive & (dist_after_new_npcs > dist_before)
+        npc_visible_final_closer = npc_visible_final_alive & (dist_after_new_npcs < dist_before)
+        event_counts = torch.stack((
+            active.sum(),
+            move_intents.sum(),
+            move_success.sum(),
+            attack_intents.sum(),
+            hits_occupied.sum(),
+            target_killed.sum(),
+            lone_target_hits.sum(),
+            hits_border.sum(),
+            consumed_food.sum(),
+            (active & (new_health <= 0)).sum(),
+            stayed_put.sum(),
+            (new_health > 0).sum(),
+            npc_killed.sum(),
+            npc_visible.sum(),
+            npc_adjacent.sum(),
+            npc_visible_move_away.sum(),
+            npc_visible_move_toward.sum(),
+            npc_visible_move_same.sum(),
+            npc_visible_successful_escape.sum(),
+            npc_visible_deaths.sum(),
+            npc_visible_npc_kills.sum(),
+            npc_visible_final_alive.sum(),
+            npc_visible_final_clear.sum(),
+            npc_visible_final_adjacent.sum(),
+            npc_visible_final_farther.sum(),
+            npc_visible_final_closer.sum(),
+        )).to(torch.float32)
+    else:
+        event_counts = torch.zeros(EVENT_COUNT_DIM, device=index_grid.device, dtype=torch.float32)
     return new_flat_positions, new_health, new_stationary_steps, hidden, actions, round_survival_steps, npc_flat_positions, event_counts
 
 

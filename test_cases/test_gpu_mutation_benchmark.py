@@ -102,7 +102,7 @@ def place_single_cell_and_npc(state, cell_row, cell_col, npc_row, npc_col):
     state.rebuild_grids()
 
 
-def run_single_family_basis_step(state, npc_direction):
+def run_single_family_basis_step(state, npc_direction, collect_event_counts=True):
     state.npc_random_directions[0, 0] = npc_direction
     outputs = snapshot_combat_step_tensors_family_basis_rebuild_grid(
         state.index_grid,
@@ -130,6 +130,7 @@ def run_single_family_basis_step(state, npc_direction):
         state.dead_index_grid_indices(),
         state.neighbor_flat_offsets,
         state.direction_flat_deltas,
+        collect_event_counts,
     )
     event_counts = dict(zip(EVENT_COUNT_NAMES, outputs[-1].to(torch.long).tolist()))
     return outputs, event_counts
@@ -1245,6 +1246,32 @@ def test_tensor_rank1_npc_visible_escape_metrics_use_final_npc_position_cpu():
     assert event_counts['npc_visible_final_adjacent'] == 0
     assert event_counts['npc_visible_final_farther'] == 1
     assert event_counts['npc_visible_final_closer'] == 0
+
+
+def test_tensor_rank1_disabling_event_counts_preserves_step_outputs_cpu():
+    state = TensorRank1State.fixed_capacity(
+        active_cells=1,
+        height=8,
+        width=8,
+        active_families=1,
+        family_capacity=1,
+        device=torch.device('cpu'),
+        initial_health=3,
+        cell_capacity=1,
+        npc_count=0,
+    )
+    place_single_cell_and_npc(state, cell_row=4, cell_col=4, npc_row=4, npc_col=5)
+    force_single_cell_action(state, direction=4, attack=False)
+    metrics_state = clone_tensor_state(state)
+    fast_state = clone_tensor_state(state)
+
+    metrics_outputs, metrics_counts = run_single_family_basis_step(metrics_state, npc_direction=3, collect_event_counts=True)
+    fast_outputs, fast_counts = run_single_family_basis_step(fast_state, npc_direction=3, collect_event_counts=False)
+
+    for metrics_value, fast_value in zip(metrics_outputs[:-1], fast_outputs[:-1]):
+        assert torch.equal(metrics_value, fast_value)
+    assert metrics_counts['npc_visible_final_clear'] == 1
+    assert all(value == 0 for value in fast_counts.values())
 
 
 def test_tensor_rank1_round_transition_health_cost_is_disabled_cpu():
