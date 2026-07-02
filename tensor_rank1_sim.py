@@ -44,6 +44,11 @@ EVENT_COUNT_NAMES = (
     'npc_visible_successful_escape',
     'npc_visible_deaths',
     'npc_visible_npc_kills',
+    'npc_visible_final_alive',
+    'npc_visible_final_clear',
+    'npc_visible_final_adjacent',
+    'npc_visible_final_farther',
+    'npc_visible_final_closer',
 )
 EVENT_COUNT_DIM = len(EVENT_COUNT_NAMES)
 _COMPILED_SNAPSHOT_COMBAT_STEP = {}
@@ -533,7 +538,8 @@ def snapshot_combat_step_tensors_family_basis_rebuild_grid(
         scatter_indices,
         dead_scatter_indices,
         neighbor_flat_offsets,
-        direction_flat_deltas):
+        direction_flat_deltas,
+        collect_event_counts=True):
     active = health > 0
     round_survival_steps = round_survival_steps + active.to(round_survival_steps.dtype)
     inputs = torch.empty(
@@ -615,7 +621,7 @@ def snapshot_combat_step_tensors_family_basis_rebuild_grid(
     new_stationary_steps = torch.where(new_health > 0, new_stationary_steps, torch.zeros_like(new_stationary_steps))
 
     alive = new_health > 0
-    if npc_flat_positions.numel() > 0:
+    if collect_event_counts and npc_flat_positions.numel() > 0:
         grid_stride = index_grid.shape[1]
         cell_rows = flat_positions.div(grid_stride, rounding_mode='floor')
         cell_cols = flat_positions.remainder(grid_stride)
@@ -641,6 +647,18 @@ def snapshot_combat_step_tensors_family_basis_rebuild_grid(
         npc_target_positions = npc_flat_positions + direction_flat_deltas[npc_direction_choices]
         npc_target_values = index_flat[npc_target_positions]
         npc_flat_positions = torch.where(npc_target_values != -2, npc_target_positions, npc_flat_positions)
+    if collect_event_counts and npc_flat_positions.numel() > 0:
+        grid_stride = index_grid.shape[1]
+        next_rows = new_flat_positions.div(grid_stride, rounding_mode='floor')
+        next_cols = new_flat_positions.remainder(grid_stride)
+        final_npc_rows = npc_flat_positions.div(grid_stride, rounding_mode='floor')
+        final_npc_cols = npc_flat_positions.remainder(grid_stride)
+        dist_after_new_npcs = (
+            (next_rows.reshape(-1, 1) - final_npc_rows.reshape(1, -1)).abs()
+            + (next_cols.reshape(-1, 1) - final_npc_cols.reshape(1, -1)).abs()
+        ).amin(dim=1)
+    else:
+        dist_after_new_npcs = torch.zeros_like(flat_positions)
     new_npc_touch = (new_flat_positions.unsqueeze(1) == npc_flat_positions.reshape(1, -1)).any(dim=1)
     index_grid[2:-2, 2:-2].fill_(-1)
     write_indices = torch.where(alive, scatter_indices, dead_scatter_indices)
@@ -663,6 +681,11 @@ def snapshot_combat_step_tensors_family_basis_rebuild_grid(
     npc_visible_successful_escape = npc_visible & final_alive & (dist_after_old_npcs > dist_before)
     npc_visible_deaths = npc_visible & (active & ~final_alive)
     npc_visible_npc_kills = npc_visible & npc_killed
+    npc_visible_final_alive = npc_visible & final_alive
+    npc_visible_final_clear = npc_visible_final_alive & (dist_after_new_npcs > 1)
+    npc_visible_final_adjacent = npc_visible_final_alive & (dist_after_new_npcs <= 1)
+    npc_visible_final_farther = npc_visible_final_alive & (dist_after_new_npcs > dist_before)
+    npc_visible_final_closer = npc_visible_final_alive & (dist_after_new_npcs < dist_before)
     new_health = torch.where(
         consumed_food,
         (new_health + torch.as_tensor(FOOD_REWARD, device=index_grid.device, dtype=health.dtype)).clamp_max(MAX_HEALTH),
@@ -706,6 +729,11 @@ def snapshot_combat_step_tensors_family_basis_rebuild_grid(
         npc_visible_successful_escape.sum(),
         npc_visible_deaths.sum(),
         npc_visible_npc_kills.sum(),
+        npc_visible_final_alive.sum(),
+        npc_visible_final_clear.sum(),
+        npc_visible_final_adjacent.sum(),
+        npc_visible_final_farther.sum(),
+        npc_visible_final_closer.sum(),
     )).to(torch.float32)
     return new_flat_positions, new_health, new_stationary_steps, hidden, actions, round_survival_steps, npc_flat_positions, event_counts
 
@@ -746,8 +774,9 @@ def compiled_family_basis_rebuild_snapshot_combat_step_tensors(mode='reduce-over
     return _COMPILED_FAMILY_BASIS_REBUILD_SNAPSHOT_COMBAT_STEP[mode]
 
 
-def family_basis_rebuild_snapshot_combat_block_tensors(block_steps):
+def family_basis_rebuild_snapshot_combat_block_tensors(block_steps, collect_event_counts=True):
     block_steps = int(block_steps)
+    collect_event_counts = bool(collect_event_counts)
 
     def block_fn(
             index_grid,
@@ -803,36 +832,41 @@ def family_basis_rebuild_snapshot_combat_block_tensors(block_steps):
                 dead_scatter_indices,
                 neighbor_flat_offsets,
                 direction_flat_deltas,
+                collect_event_counts,
             )
-            total_event_counts = total_event_counts + event_counts
+            if collect_event_counts:
+                total_event_counts = total_event_counts + event_counts
         return flat_positions, health, stationary_steps, recurrent_state, round_survival_steps, npc_flat_positions, total_event_counts
 
     return block_fn
 
 
-def compiled_family_basis_rebuild_snapshot_combat_block_tensors(block_steps, mode='default'):
+def compiled_family_basis_rebuild_snapshot_combat_block_tensors(block_steps, mode='default', collect_event_counts=True):
     mode = resolve_compile_mode(mode)
     block_steps = int(block_steps)
+    collect_event_counts = bool(collect_event_counts)
     if block_steps <= 0:
         raise ValueError('block_steps must be positive')
-    key = (mode, block_steps)
+    key = (mode, block_steps, collect_event_counts)
     if key not in _COMPILED_FAMILY_BASIS_REBUILD_SNAPSHOT_COMBAT_BLOCK:
         _COMPILED_FAMILY_BASIS_REBUILD_SNAPSHOT_COMBAT_BLOCK[key] = torch.compile(
-            family_basis_rebuild_snapshot_combat_block_tensors(block_steps),
+            family_basis_rebuild_snapshot_combat_block_tensors(block_steps, collect_event_counts),
             mode=mode,
         )
     return _COMPILED_FAMILY_BASIS_REBUILD_SNAPSHOT_COMBAT_BLOCK[key]
 
 
 class CudaGraphFamilyBasisBlockRunner:
-    def __init__(self, state, block_steps, compile_mode='default'):
+    def __init__(self, state, block_steps, compile_mode='default', collect_event_counts=True):
         if state.device.type != 'cuda':
             raise ValueError('cuda graph block replay requires CUDA tensors')
         self.state = state
         self.block_steps = int(block_steps)
+        self.collect_event_counts = bool(collect_event_counts)
         self.step_fn = compiled_family_basis_rebuild_snapshot_combat_block_tensors(
             self.block_steps,
             compile_mode,
+            self.collect_event_counts,
         )
         self.graph = torch.cuda.CUDAGraph()
         self.event_counts = torch.empty(EVENT_COUNT_DIM, device=state.device, dtype=torch.float32)
@@ -1950,7 +1984,12 @@ class TensorRank1State:
             self.apply_snapshot_combat(actions, compact_dead=compact_dead, sync_positions=sync_positions)
         return actions
 
-    def compiled_snapshot_combat_step(self, rebuild_grid=False, family_basis=False, compile_mode='reduce-overhead'):
+    def compiled_snapshot_combat_step(
+            self,
+            rebuild_grid=False,
+            family_basis=False,
+            compile_mode='reduce-overhead',
+            collect_event_counts=True):
         if family_basis:
             step_fn = compiled_family_basis_rebuild_snapshot_combat_step_tensors(compile_mode)
             (
@@ -1962,7 +2001,7 @@ class TensorRank1State:
                 self.round_survival_steps,
                 self.npc_flat_positions,
                 event_counts,
-            ) = step_fn(*self.family_basis_step_args())
+            ) = step_fn(*self.family_basis_step_args(), collect_event_counts)
             refresh_npc_grid(self.npc_grid, self.npc_flat_positions)
             return event_counts
         else:
@@ -1993,18 +2032,29 @@ class TensorRank1State:
             )
         return actions
 
-    def compiled_snapshot_combat_steps(self, block_steps, rebuild_grid=False, family_basis=False, compile_mode='default'):
+    def compiled_snapshot_combat_steps(
+            self,
+            block_steps,
+            rebuild_grid=False,
+            family_basis=False,
+            compile_mode='default',
+            collect_event_counts=True):
         block_steps = int(block_steps)
         if block_steps == 1:
             return self.compiled_snapshot_combat_step(
                 rebuild_grid=rebuild_grid,
                 family_basis=family_basis,
                 compile_mode=compile_mode,
+                collect_event_counts=collect_event_counts,
             )
         if not (rebuild_grid and family_basis):
             raise ValueError('compiled block steps currently require rebuild_grid and family_basis')
         self.refresh_npc_random_directions(block_steps)
-        step_fn = compiled_family_basis_rebuild_snapshot_combat_block_tensors(block_steps, compile_mode)
+        step_fn = compiled_family_basis_rebuild_snapshot_combat_block_tensors(
+            block_steps,
+            compile_mode,
+            collect_event_counts,
+        )
         (
             self.flat_positions,
             self.health,
@@ -2244,6 +2294,11 @@ def benchmark_tensor_state(
             'npc_visible_move_away_rate': values['npc_visible_move_away'] / visible_steps,
             'npc_visible_move_toward_rate': values['npc_visible_move_toward'] / visible_steps,
             'npc_visible_move_same_rate': values['npc_visible_move_same'] / visible_steps,
+            'npc_visible_final_alive_rate': values['npc_visible_final_alive'] / visible_steps,
+            'npc_visible_final_clear_rate': values['npc_visible_final_clear'] / visible_steps,
+            'npc_visible_final_adjacent_rate': values['npc_visible_final_adjacent'] / visible_steps,
+            'npc_visible_final_farther_rate': values['npc_visible_final_farther'] / visible_steps,
+            'npc_visible_final_closer_rate': values['npc_visible_final_closer'] / visible_steps,
             'stayed_put_rate': values['stayed_put'] / active_steps,
         })
         return values
@@ -2289,28 +2344,31 @@ def benchmark_tensor_state(
                     rebuild_grid=static_rebuild_grid,
                     family_basis=family_basis_step,
                     compile_mode=compile_mode,
+                    collect_event_counts=collect_event_counts,
                 )
                 synchronize(state.device)
                 runner = CudaGraphFamilyBasisBlockRunner(
                     state,
                     step_count,
                     compile_mode,
+                    collect_event_counts,
                 )
                 graph_block_runners[step_count] = runner
                 timed_cuda_graph_captures += 1
-            runner.replay()
-            return None
+            return runner.replay()
         if step_count == 1:
             return state.compiled_snapshot_combat_step(
                 rebuild_grid=static_rebuild_grid,
                 family_basis=family_basis_step,
                 compile_mode=compile_mode,
+                collect_event_counts=collect_event_counts,
             )
         return state.compiled_snapshot_combat_steps(
             step_count,
             rebuild_grid=static_rebuild_grid,
             family_basis=family_basis_step,
             compile_mode=compile_mode,
+            collect_event_counts=collect_event_counts,
         )
 
     def next_block_step_count(step_index):

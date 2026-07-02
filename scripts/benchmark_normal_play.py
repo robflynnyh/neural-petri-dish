@@ -87,6 +87,11 @@ def event_window_summary(trace_segments, start, end):
         'npc_visible_move_away_rate': counts['npc_visible_move_away'] / visible_steps,
         'npc_visible_move_toward_rate': counts['npc_visible_move_toward'] / visible_steps,
         'npc_visible_move_same_rate': counts['npc_visible_move_same'] / visible_steps,
+        'npc_visible_final_alive_rate': counts['npc_visible_final_alive'] / visible_steps,
+        'npc_visible_final_clear_rate': counts['npc_visible_final_clear'] / visible_steps,
+        'npc_visible_final_adjacent_rate': counts['npc_visible_final_adjacent'] / visible_steps,
+        'npc_visible_final_farther_rate': counts['npc_visible_final_farther'] / visible_steps,
+        'npc_visible_final_closer_rate': counts['npc_visible_final_closer'] / visible_steps,
         'stayed_put_rate': counts['stayed_put'] / active_steps,
     })
     return counts

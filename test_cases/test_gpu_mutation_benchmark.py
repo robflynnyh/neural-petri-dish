@@ -532,34 +532,13 @@ def test_snapshot_combat_family_basis_rebuild_step_matches_eager_cpu():
         families=3,
         device=torch.device('cpu'),
         initial_health=5,
+        npc_count=0,
     )
     tensor_step = clone_tensor_state(eager)
 
     eager_actions = eager.step(movement='snapshot_combat', compact_dead=False, sync_positions=False)
-    flat_positions, health, stationary_steps, recurrent_state, tensor_actions = snapshot_combat_step_tensors_family_basis_rebuild_grid(
-        tensor_step.index_grid,
-        tensor_step.food_grid,
-        tensor_step.flat_positions,
-        tensor_step.health,
-        tensor_step.stationary_steps,
-        tensor_step.recurrent_state,
-        tensor_step.family_index,
-        tensor_step.coeff_1,
-        tensor_step.coeff_2,
-        tensor_step.bias_1,
-        tensor_step.bias_2,
-        tensor_step.base_weight_1_matmul,
-        tensor_step.base_weight_2_matmul,
-        tensor_step.u_1,
-        tensor_step.v_1,
-        tensor_step.u_2,
-        tensor_step.v_2,
-        tensor_step.stationary_health_cap,
-        tensor_step.index_grid_indices(),
-        tensor_step.dead_index_grid_indices(),
-        tensor_step.neighbor_flat_offsets,
-        tensor_step.direction_flat_deltas,
-    )
+    outputs = snapshot_combat_step_tensors_family_basis_rebuild_grid(*tensor_step.family_basis_step_args())
+    flat_positions, health, stationary_steps, recurrent_state, tensor_actions = outputs[:5]
 
     assert torch.equal(tensor_actions, eager_actions)
     assert torch.equal(flat_positions, eager.flat_positions)
@@ -579,39 +558,20 @@ def test_snapshot_combat_family_basis_rebuild_step_matches_eager_for_multiple_st
         families=3,
         device=torch.device('cpu'),
         initial_health=5,
+        npc_count=0,
     )
     tensor_step = clone_tensor_state(eager)
 
     for _ in range(2):
         eager_actions = eager.step(movement='snapshot_combat', compact_dead=False, sync_positions=False)
-        flat_positions, health, stationary_steps, recurrent_state, tensor_actions = snapshot_combat_step_tensors_family_basis_rebuild_grid(
-            tensor_step.index_grid,
-            tensor_step.food_grid,
-            tensor_step.flat_positions,
-            tensor_step.health,
-            tensor_step.stationary_steps,
-            tensor_step.recurrent_state,
-            tensor_step.family_index,
-            tensor_step.coeff_1,
-            tensor_step.coeff_2,
-            tensor_step.bias_1,
-            tensor_step.bias_2,
-            tensor_step.base_weight_1_matmul,
-            tensor_step.base_weight_2_matmul,
-            tensor_step.u_1,
-            tensor_step.v_1,
-            tensor_step.u_2,
-            tensor_step.v_2,
-            tensor_step.stationary_health_cap,
-            tensor_step.index_grid_indices(),
-            tensor_step.dead_index_grid_indices(),
-            tensor_step.neighbor_flat_offsets,
-            tensor_step.direction_flat_deltas,
-        )
+        outputs = snapshot_combat_step_tensors_family_basis_rebuild_grid(*tensor_step.family_basis_step_args())
+        flat_positions, health, stationary_steps, recurrent_state, tensor_actions = outputs[:5]
         tensor_step.flat_positions = flat_positions
         tensor_step.health = health
         tensor_step.stationary_steps = stationary_steps
         tensor_step.recurrent_state = recurrent_state
+        tensor_step.round_survival_steps = outputs[5]
+        tensor_step.npc_flat_positions = outputs[6]
 
         assert torch.equal(tensor_actions, eager_actions)
         assert torch.equal(tensor_step.flat_positions, eager.flat_positions)
@@ -631,36 +591,16 @@ def test_snapshot_combat_family_basis_rebuild_block_matches_eager_cpu():
         families=3,
         device=torch.device('cpu'),
         initial_health=5,
+        npc_count=0,
     )
     tensor_step = clone_tensor_state(eager)
     block_fn = family_basis_rebuild_snapshot_combat_block_tensors(2)
 
     for _ in range(2):
         eager.step(movement='snapshot_combat', compact_dead=False, sync_positions=False)
-    flat_positions, health, stationary_steps, recurrent_state = block_fn(
-        tensor_step.index_grid,
-        tensor_step.food_grid,
-        tensor_step.flat_positions,
-        tensor_step.health,
-        tensor_step.stationary_steps,
-        tensor_step.recurrent_state,
-        tensor_step.family_index,
-        tensor_step.coeff_1,
-        tensor_step.coeff_2,
-        tensor_step.bias_1,
-        tensor_step.bias_2,
-        tensor_step.base_weight_1_matmul,
-        tensor_step.base_weight_2_matmul,
-        tensor_step.u_1,
-        tensor_step.v_1,
-        tensor_step.u_2,
-        tensor_step.v_2,
-        tensor_step.stationary_health_cap,
-        tensor_step.index_grid_indices(),
-        tensor_step.dead_index_grid_indices(),
-        tensor_step.neighbor_flat_offsets,
-        tensor_step.direction_flat_deltas,
-    )
+    tensor_step.refresh_npc_random_directions(2)
+    outputs = block_fn(*tensor_step.family_basis_block_args())
+    flat_positions, health, stationary_steps, recurrent_state = outputs[:4]
 
     assert torch.equal(flat_positions, eager.flat_positions)
     assert torch.equal(health, eager.health)
@@ -679,6 +619,7 @@ def test_snapshot_combat_stationary_action_damages_and_can_kill_cpu():
         device=torch.device('cpu'),
         initial_health=2,
         stationary_health_cap=1,
+        npc_count=0,
     )
     state.base_weight_1.zero_()
     state.base_weight_2.zero_()
@@ -696,14 +637,20 @@ def test_snapshot_combat_stationary_action_damages_and_can_kill_cpu():
     health = state.health
     stationary_steps = state.stationary_steps
     flat_positions = state.flat_positions
+    recurrent_state = state.recurrent_state
+    round_survival_steps = state.round_survival_steps
+    state.refresh_npc_random_directions(1)
     for _ in range(4):
-        flat_positions, health, stationary_steps, _recurrent_state, actions = snapshot_combat_step_tensors_family_basis_rebuild_grid(
+        outputs = snapshot_combat_step_tensors_family_basis_rebuild_grid(
             state.index_grid,
             state.food_grid,
             flat_positions,
             health,
             stationary_steps,
-            state.recurrent_state,
+            recurrent_state,
+            round_survival_steps,
+            state.npc_flat_positions,
+            state.npc_random_directions[0],
             state.family_index,
             state.coeff_1,
             state.coeff_2,
@@ -721,6 +668,7 @@ def test_snapshot_combat_stationary_action_damages_and_can_kill_cpu():
             state.neighbor_flat_offsets,
             state.direction_flat_deltas,
         )
+        flat_positions, health, stationary_steps, recurrent_state, actions, round_survival_steps = outputs[:6]
 
     assert torch.equal(actions, torch.zeros_like(actions))
     assert torch.equal(flat_positions, state.flat_positions)
@@ -737,33 +685,12 @@ def test_snapshot_combat_family_basis_sanitizes_nan_recurrent_state_cpu():
         families=2,
         device=torch.device('cpu'),
         initial_health=5,
+        npc_count=0,
     )
     state.recurrent_state.fill_(float('nan'))
 
-    _flat_positions, _health, _stationary_steps, recurrent_state, actions = snapshot_combat_step_tensors_family_basis_rebuild_grid(
-        state.index_grid,
-        state.food_grid,
-        state.flat_positions,
-        state.health,
-        state.stationary_steps,
-        state.recurrent_state,
-        state.family_index,
-        state.coeff_1,
-        state.coeff_2,
-        state.bias_1,
-        state.bias_2,
-        state.base_weight_1_matmul,
-        state.base_weight_2_matmul,
-        state.u_1,
-        state.v_1,
-        state.u_2,
-        state.v_2,
-        state.stationary_health_cap,
-        state.index_grid_indices(),
-        state.dead_index_grid_indices(),
-        state.neighbor_flat_offsets,
-        state.direction_flat_deltas,
-    )
+    outputs = snapshot_combat_step_tensors_family_basis_rebuild_grid(*state.family_basis_step_args())
+    _flat_positions, _health, _stationary_steps, recurrent_state, actions = outputs[:5]
 
     assert torch.isfinite(recurrent_state).all()
     assert actions.ge(0).all()
@@ -1046,15 +973,15 @@ def test_tensor_rank1_state_weighted_wave_uses_standardized_survival_update():
     state.round_participants = torch.ones(old_cells, dtype=torch.bool)
     fitness = state.round_survival_steps / 500.0
     advantage = (fitness - fitness.mean()) / fitness.std(unbiased=False)
-    expected_weight_1 = state.evolution_anchor_weight_1 + 0.05 * (
+    expected_weight_1 = state.evolution_anchor_weight_1 + npd.FITNESS_UPDATE_LR * (
         advantage.reshape(-1, 1, 1)
         * (state.dense_weight_1() - state.evolution_anchor_weight_1.unsqueeze(0))
     ).mean(dim=0)
-    expected_weight_2 = state.evolution_anchor_weight_2 + 0.05 * (
+    expected_weight_2 = state.evolution_anchor_weight_2 + npd.FITNESS_UPDATE_LR * (
         advantage.reshape(-1, 1, 1)
         * (state.dense_weight_2() - state.evolution_anchor_weight_2.unsqueeze(0))
     ).mean(dim=0)
-    expected_bias_1 = state.evolution_anchor_bias_1 + 0.05 * (
+    expected_bias_1 = state.evolution_anchor_bias_1 + npd.FITNESS_UPDATE_LR * (
         advantage.reshape(-1, 1)
         * (state.bias_1 - state.evolution_anchor_bias_1.unsqueeze(0))
     ).mean(dim=0)
@@ -1257,6 +1184,8 @@ def test_tensor_rank1_cell_dies_when_moving_into_npc_old_tile_cpu():
     assert event_counts['npc_visible_cell_steps'] == 1
     assert event_counts['npc_visible_deaths'] == 1
     assert event_counts['npc_visible_npc_kills'] == 1
+    assert event_counts['npc_visible_final_alive'] == 0
+    assert event_counts['npc_visible_final_clear'] == 0
 
 
 def test_tensor_rank1_cell_dies_when_npc_moves_into_cell_cpu():
@@ -1284,6 +1213,38 @@ def test_tensor_rank1_cell_dies_when_npc_moves_into_cell_cpu():
     assert event_counts['npc_visible_cell_steps'] == 1
     assert event_counts['npc_visible_deaths'] == 1
     assert event_counts['npc_visible_npc_kills'] == 1
+    assert event_counts['npc_visible_final_alive'] == 0
+    assert event_counts['npc_visible_final_clear'] == 0
+
+
+def test_tensor_rank1_npc_visible_escape_metrics_use_final_npc_position_cpu():
+    state = TensorRank1State.fixed_capacity(
+        active_cells=1,
+        height=8,
+        width=8,
+        active_families=1,
+        family_capacity=1,
+        device=torch.device('cpu'),
+        initial_health=3,
+        cell_capacity=1,
+        npc_count=0,
+    )
+    place_single_cell_and_npc(state, cell_row=4, cell_col=4, npc_row=4, npc_col=5)
+    force_single_cell_action(state, direction=4, attack=False)
+
+    outputs, event_counts = run_single_family_basis_step(state, npc_direction=3)
+    new_flat_positions, new_health, *_rest = outputs
+
+    assert int(new_flat_positions[0].item()) == 4 * state.grid_stride + 3
+    assert float(new_health[0].item()) == pytest.approx(3 - npd.MOVEMENT_HEALTH_COST)
+    assert event_counts['npc_visible_cell_steps'] == 1
+    assert event_counts['npc_visible_move_away'] == 1
+    assert event_counts['npc_visible_deaths'] == 0
+    assert event_counts['npc_visible_final_alive'] == 1
+    assert event_counts['npc_visible_final_clear'] == 1
+    assert event_counts['npc_visible_final_adjacent'] == 0
+    assert event_counts['npc_visible_final_farther'] == 1
+    assert event_counts['npc_visible_final_closer'] == 0
 
 
 def test_tensor_rank1_round_transition_health_cost_is_disabled_cpu():
@@ -1405,6 +1366,7 @@ def test_tensor_rank1_benchmark_refills_empty_board_on_cpu():
         wave_size=4,
         wave_initial_health=1,
         compact_every=2,
+        npc_count=0,
     )
 
     assert metrics['compact_every'] == 2
@@ -1622,6 +1584,7 @@ def test_tensor_rank1_benchmark_static_capacity_empty_refill_cpu():
         static_capacity=True,
         family_capacity=3,
         static_refill_empty=True,
+        npc_count=0,
     )
 
     assert metrics['static_refill_empty'] is True
@@ -1694,6 +1657,7 @@ def test_tensor_rank1_empty_refill_uses_single_active_family_fast_path():
         width=8,
         families=1,
         device=torch.device('cpu'),
+        npc_count=0,
     )
 
     spawned = state.append_weighted_wave(4, initial_health=5)
@@ -1722,6 +1686,7 @@ def test_tensor_rank1_benchmark_spawns_scheduled_waves_only_on_interval_cpu():
         wave_size=3,
         wave_initial_health=100,
         compact_every=2,
+        npc_count=0,
     )
 
     assert metrics['empty_refills'] == 0
@@ -1747,6 +1712,7 @@ def test_tensor_rank1_benchmark_normal_round_refill_uses_live_cell_count_cpu():
         normal_round_refill=True,
         per_wave=5,
         min_wave=2,
+        npc_count=0,
     )
 
     assert metrics['normal_round_refill'] is True
