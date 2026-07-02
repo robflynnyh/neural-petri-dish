@@ -12,6 +12,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 import neural_petri_dish as npd
 from tensor_rank1_sim import (
     COMPILE_MODES,
+    EVENT_COUNT_NAMES,
     HEALTH_DTYPES,
     MATMUL_PRECISIONS,
     NETWORK_DTYPES,
@@ -53,11 +54,60 @@ def parse_args():
     parser.add_argument('--tensor-cuda-graph-block', dest='no_tensor_cuda_graph_block', action='store_false')
     parser.add_argument('--no-tensor-cuda-graph-block', dest='no_tensor_cuda_graph_block', action='store_true')
     parser.set_defaults(no_tensor_cuda_graph_block=True)
+    parser.add_argument('--collect-event-counts', action='store_true')
+    parser.add_argument('--include-round-event-counts', action='store_true')
     parser.add_argument('--output-json')
     args = parser.parse_args()
     if args.engine == 'tensor_rank1' and args.action_device == 'cpu':
         parser.error('--engine tensor_rank1 requires --action-device cuda or --action-device auto')
     return args
+
+
+def event_window_summary(trace_segments, start, end):
+    rows = trace_segments[start:end]
+    if not rows:
+        return {}
+    counts = {name: 0 for name in EVENT_COUNT_NAMES}
+    for row in rows:
+        event_counts = row.get('event_counts', {})
+        for name in EVENT_COUNT_NAMES:
+            counts[name] += int(event_counts.get(name, 0))
+    active_steps = max(1, counts['active_cell_steps'])
+    visible_steps = max(1, counts['npc_visible_cell_steps'])
+    counts.update({
+        'round_start': int(start + 1),
+        'round_end': int(end),
+        'rounds': int(len(rows)),
+        'seconds': float(sum(row['seconds'] for row in rows)),
+        'move_success_rate': counts['move_successes'] / active_steps,
+        'death_rate': counts['deaths'] / active_steps,
+        'npc_kill_rate': counts['npc_kills'] / active_steps,
+        'npc_adjacent_fraction': counts['npc_adjacent_cell_steps'] / active_steps,
+        'npc_visible_death_rate': counts['npc_visible_deaths'] / visible_steps,
+        'npc_visible_move_away_rate': counts['npc_visible_move_away'] / visible_steps,
+        'npc_visible_move_toward_rate': counts['npc_visible_move_toward'] / visible_steps,
+        'npc_visible_move_same_rate': counts['npc_visible_move_same'] / visible_steps,
+        'stayed_put_rate': counts['stayed_put'] / active_steps,
+    })
+    return counts
+
+
+def add_event_count_summary(metrics, window=100):
+    trace_segments = metrics.get('trace_segments', [])
+    if not trace_segments or 'event_counts' not in trace_segments[0]:
+        return
+    window = min(int(window), len(trace_segments))
+    metrics['event_count_summary'] = {
+        'window_rounds': window,
+        'all': event_window_summary(trace_segments, 0, len(trace_segments)),
+        'first_window': event_window_summary(trace_segments, 0, window),
+        'last_window': event_window_summary(trace_segments, len(trace_segments) - window, len(trace_segments)),
+    }
+
+
+def strip_round_event_counts(metrics):
+    for segment in metrics.get('trace_segments', []):
+        segment.pop('event_counts', None)
 
 
 def run_tensor_rank1(args):
@@ -103,16 +153,24 @@ def run_tensor_rank1(args):
         per_wave=npd.PER_WAVE,
         min_wave=npd.MIN_WAVE,
         npc_count=args.npc_count,
+        collect_event_counts=args.collect_event_counts,
     )
+    if args.collect_event_counts:
+        add_event_count_summary(metrics)
     completed = []
     for index, segment in enumerate(metrics.get('trace_segments', []), start=1):
-        completed.append({
+        round_metrics = {
             'round': index,
             'seconds': segment['seconds'],
             'cells': segment['active_cells_end'],
             'waves_spawned': segment['waves_spawned'],
             'empty_refills': segment['empty_refills'],
-        })
+        }
+        if args.include_round_event_counts and 'event_counts' in segment:
+            round_metrics['event_counts'] = segment['event_counts']
+        completed.append(round_metrics)
+    if args.collect_event_counts and not args.include_round_event_counts:
+        strip_round_event_counts(metrics)
     return {
         'engine': args.engine,
         'semantic_note': (

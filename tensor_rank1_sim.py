@@ -2053,7 +2053,8 @@ def benchmark_tensor_state(
         early_end_empty_round=False,
         per_wave=None,
         min_wave=None,
-        npc_count=npd.NPC_COUNT):
+        npc_count=npd.NPC_COUNT,
+        collect_event_counts=False):
     compiled_step = bool(compiled_step)
     static_capacity = bool(static_capacity)
     static_refill_empty = bool(static_refill_empty)
@@ -2062,6 +2063,7 @@ def benchmark_tensor_state(
     cuda_graph_block = bool(cuda_graph_block)
     normal_round_refill = bool(normal_round_refill)
     early_end_empty_round = bool(early_end_empty_round)
+    collect_event_counts = bool(collect_event_counts)
     static_refill_check_every = max(int(static_refill_check_every), 1)
     compiled_block_steps = max(int(compiled_block_steps), 1)
     per_wave = npd.PER_WAVE if per_wave is None else int(per_wave)
@@ -2177,6 +2179,13 @@ def benchmark_tensor_state(
     segment_start_cells = 0
     segment_start_active_cells = 0
     segment_start_families = 0
+    event_count_names = EVENT_COUNT_NAMES
+    event_count_dim = EVENT_COUNT_DIM
+    total_event_counts_tensor = None
+    segment_event_counts_tensor = None
+    if collect_event_counts:
+        total_event_counts_tensor = torch.zeros(event_count_dim, device=device, dtype=torch.float64)
+        segment_event_counts_tensor = torch.zeros(event_count_dim, device=device, dtype=torch.float64)
     completed_steps = 0
     graph_block_runners = {}
     timed_cuda_graph_captures = 0
@@ -2222,8 +2231,25 @@ def benchmark_tensor_state(
             return min_wave
         return wave_size
 
+    def event_counts_to_metrics(counts):
+        values = {name: int(value) for name, value in zip(event_count_names, counts)}
+        active_steps = max(1, values['active_cell_steps'])
+        visible_steps = max(1, values['npc_visible_cell_steps'])
+        values.update({
+            'move_success_rate': values['move_successes'] / active_steps,
+            'death_rate': values['deaths'] / active_steps,
+            'npc_kill_rate': values['npc_kills'] / active_steps,
+            'npc_adjacent_fraction': values['npc_adjacent_cell_steps'] / active_steps,
+            'npc_visible_death_rate': values['npc_visible_deaths'] / visible_steps,
+            'npc_visible_move_away_rate': values['npc_visible_move_away'] / visible_steps,
+            'npc_visible_move_toward_rate': values['npc_visible_move_toward'] / visible_steps,
+            'npc_visible_move_same_rate': values['npc_visible_move_same'] / visible_steps,
+            'stayed_put_rate': values['stayed_put'] / active_steps,
+        })
+        return values
+
     def append_trace_segment(start_step, end_step, segment_seconds, end_active_cells):
-        trace_segments.append({
+        segment = {
             'start_step': start_step,
             'end_step': end_step,
             'seconds': segment_seconds,
@@ -2239,7 +2265,18 @@ def benchmark_tensor_state(
             'waves_spawned_total': waves_spawned,
             'empty_refills': segment_empty_refills,
             'empty_refills_total': empty_refills,
-        })
+        }
+        if collect_event_counts:
+            segment_counts = segment_event_counts_tensor.detach().cpu().to(torch.long).tolist()
+            segment['event_counts'] = event_counts_to_metrics(segment_counts)
+        trace_segments.append(segment)
+
+    def record_event_counts(event_counts):
+        if not collect_event_counts or event_counts is None:
+            return
+        counts = event_counts.to(device=state.device, dtype=torch.float64)
+        total_event_counts_tensor.add_(counts)
+        segment_event_counts_tensor.add_(counts)
 
     def run_compiled_steps(step_count):
         nonlocal timed_cuda_graph_captures
@@ -2375,6 +2412,7 @@ def benchmark_tensor_state(
             segment_processed_cell_steps += state.cells * step_count
             if compiled_step:
                 actions = run_compiled_steps(step_count)
+                record_event_counts(actions)
             else:
                 actions = state.step(
                     movement=movement,
@@ -2443,6 +2481,8 @@ def benchmark_tensor_state(
                 segment_processed_cell_steps = 0
                 segment_waves_spawned = 0
                 segment_empty_refills = 0
+                if collect_event_counts:
+                    segment_event_counts_tensor.zero_()
                 segment_start_cells = state.cells
                 segment_start_active_cells = end_active_cells
                 segment_start_families = state.families
@@ -2511,4 +2551,7 @@ def benchmark_tensor_state(
     if trace_every:
         metrics['trace_every'] = trace_every
         metrics['trace_segments'] = trace_segments
+    if collect_event_counts:
+        total_counts = total_event_counts_tensor.detach().cpu().to(torch.long).tolist()
+        metrics['event_counts'] = event_counts_to_metrics(total_counts)
     return metrics
