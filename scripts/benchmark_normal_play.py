@@ -41,6 +41,7 @@ def parse_args():
     parser.add_argument('--tensor-initial-health', type=positive_int, default=15)
     parser.add_argument('--tensor-wave-initial-health', type=positive_int, default=2)
     parser.add_argument('--tensor-coeff-scale', type=float, default=npd.FACTORED_WAVE_COEFF_SCALE)
+    parser.add_argument('--fitness-update-lr', type=float, default=npd.FITNESS_UPDATE_LR)
     parser.add_argument('--tensor-stationary-health-cap', type=int, default=1)
     parser.add_argument('--tensor-family-capacity', type=positive_int, default=10)
     parser.add_argument('--tensor-cell-capacity', type=positive_int)
@@ -56,6 +57,7 @@ def parse_args():
     parser.set_defaults(no_tensor_cuda_graph_block=True)
     parser.add_argument('--collect-event-counts', action='store_true')
     parser.add_argument('--include-round-event-counts', action='store_true')
+    parser.add_argument('--quiet', action='store_true', help='suppress stdout JSON; useful with --output-json')
     parser.add_argument('--output-json')
     args = parser.parse_args()
     if args.engine == 'tensor_rank1' and args.action_device == 'cpu':
@@ -116,6 +118,7 @@ def strip_round_event_counts(metrics):
 
 
 def run_tensor_rank1(args):
+    npd.FITNESS_UPDATE_LR = args.fitness_update_lr
     torch.manual_seed(args.seed)
     size = npd.terminal_size(args.size)
     device_name = args.action_device
@@ -251,7 +254,8 @@ def run(args):
 def main():
     args = parse_args()
     metrics = run(args)
-    print(json.dumps(metrics, indent=2, sort_keys=True))
+    if not args.quiet:
+        print(json.dumps(metrics, indent=2, sort_keys=True))
     if args.output_json:
         with open(args.output_json, 'w', encoding='utf-8') as handle:
             json.dump(metrics, handle, indent=2, sort_keys=True)

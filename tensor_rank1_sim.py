@@ -2406,6 +2406,7 @@ def benchmark_tensor_state(
                         state,
                         step_count,
                         compile_mode,
+                        collect_event_counts,
                     )
                 synchronize(state.device)
             cuda_graph_replay_enabled = True
