@@ -1,0 +1,11 @@
+Neural Petri Dish tensor rank-1 intermediate 10k preview
+
+output: test_cases/artifacts/tensor_rank1_10k_rounds_every_1000_foodfix_coeff4_lr2_intermediate_preview.mp4
+source_run_output: test_cases/artifacts/tensor_rank1_10k_rounds_every_1000_foodfix_coeff4_lr2.mp4
+source_run_status_at_preview: still running
+repair_method: untrunc using test_cases/artifacts/tensor_rank1_1k_rounds_every_100_foodfix_coeff4_lr2.mp4 as reference, then ffmpeg stream copy remux
+frames: 4258
+duration_seconds: 177.416667
+size: 640x498
+rendered_content_reaches: round 8000 sample, countdown 202 in sampled late frame
+note: this is a playable preview reconstructed from the partially written MP4 before the final moov atom existed
