@@ -340,7 +340,8 @@ class TensorRank1VideoRun:
         if step_count <= 0:
             return
         if self.device.type == 'cuda':
-            if use_cuda_graph and not self.args.no_tensor_cuda_graph:
+            npc_graph_safe = self.state.npc_flat_positions.numel() == 0
+            if use_cuda_graph and not self.args.no_tensor_cuda_graph and npc_graph_safe:
                 event_counts = self.graph_runner(step_count).replay()
             else:
                 event_counts = self.state.compiled_snapshot_combat_steps(
