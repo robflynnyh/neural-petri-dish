@@ -1,0 +1,33 @@
+{
+  "action_device": "cuda",
+  "active_cells_final": 600,
+  "cell_capacity": 4640,
+  "cuda_graph_captures": 0,
+  "cuda_name": "NVIDIA RTX A4500",
+  "early_ended_rounds": 939,
+  "elapsed_seconds": 69.31865899823606,
+  "empty_refills": 0,
+  "family_capacity_final": 10,
+  "final_state": "test_cases/artifacts/tensor_rank1_1k_rounds_every_100_per_cell_rank1_lr015_coeff06_final_state.pt",
+  "fitness_update_lr": 0.15,
+  "food_health_reward": 2.5,
+  "food_per_round": 25,
+  "food_remaining_final": 25,
+  "frames_written": 1356,
+  "full_simulation_frames": 166966,
+  "output": "test_cases/artifacts/tensor_rank1_1k_rounds_every_100_per_cell_rank1_lr015_coeff06.mp4",
+  "rendered_rounds": [
+    0,
+    100,
+    200,
+    300,
+    400,
+    500,
+    600,
+    700,
+    800,
+    900
+  ],
+  "rounds_completed": 1000,
+  "waves_spawned": 599936
+}

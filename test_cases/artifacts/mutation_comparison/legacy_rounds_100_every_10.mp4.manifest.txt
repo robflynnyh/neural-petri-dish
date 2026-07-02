@@ -1,0 +1,14 @@
+Neural Petri Dish mutation comparison video
+
+output: test_cases/artifacts/mutation_comparison/legacy_rounds_100_every_10.mp4
+mutation_mode: legacy
+rounds: 100
+render_every_rounds: 10
+fps: 30
+size: 18x60
+initial_cells: 300
+seed: 7
+action_mode: simultaneous
+roundtime: 500
+frames_written: 5001
+rendered_rounds: 0,10,20,30,40,50,60,70,80,90

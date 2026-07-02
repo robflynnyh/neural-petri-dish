@@ -1,0 +1,28 @@
+{
+  "action_device": "cuda",
+  "active_cells_final": 300,
+  "cell_capacity": 4640,
+  "cuda_graph_captures": 0,
+  "cuda_name": "NVIDIA RTX A4500",
+  "elapsed_seconds": 136.94575884006917,
+  "empty_refills": 2,
+  "family_capacity_final": 10,
+  "final_state": "test_cases/artifacts/tensor_rank1_1k_rounds_every_100.final_state.pt",
+  "frames_written": 5000,
+  "full_simulation_frames": 500000,
+  "output": "test_cases/artifacts/tensor_rank1_1k_rounds_every_100.mp4",
+  "rendered_rounds": [
+    0,
+    100,
+    200,
+    300,
+    400,
+    500,
+    600,
+    700,
+    800,
+    900
+  ],
+  "rounds_completed": 1000,
+  "waves_spawned": 300500
+}

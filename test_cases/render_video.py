@@ -28,6 +28,8 @@ def parse_args():
     parser.add_argument('--size', type=npd.parse_size, default=(18, 60), help='grid size as LINESxCOLUMNS')
     parser.add_argument('--initial-cells', type=positive_int, default=300)
     parser.add_argument('--seed', type=int, default=7)
+    parser.add_argument('--mutation-mode', choices=npd.MUTATION_MODES, default=npd.DEFAULT_MUTATION_MODE)
+    parser.add_argument('--action-backend', choices=npd.ACTION_BACKENDS, default=npd.ACTION_BACKEND_SEQUENTIAL)
     parser.add_argument('--cell-size', type=positive_int, default=8)
     parser.add_argument('--status-height', type=positive_int, default=34)
     parser.add_argument(
@@ -156,6 +158,8 @@ def write_manifest(path, args, frames_written, rounds_rendered):
         f'size: {size.lines}x{size.columns}',
         f'initial_cells: {args.initial_cells}',
         f'seed: {args.seed}',
+        f'mutation_mode: {args.mutation_mode}',
+        f'action_backend: {args.action_backend}',
         f'cell_size: {args.cell_size}',
         f'rendered_rounds: {",".join(str(round_num) for round_num in rounds_rendered)}',
         '',
@@ -204,7 +208,10 @@ def main():
 
     npd.seed_all(args.seed)
     with torch.no_grad():
-        game = npd.init(npd.Game(size=args.size), num=args.initial_cells)
+        game = npd.init(
+            npd.Game(size=args.size, mutation_mode=args.mutation_mode, action_backend=args.action_backend),
+            num=args.initial_cells,
+        )
         countdown = npd.ROUNDTIME
         with imageio.get_writer(output, fps=args.fps, macro_block_size=1) as writer:
             if args.render_rounds is None:
